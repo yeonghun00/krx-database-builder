@@ -24,6 +24,7 @@ A comprehensive system for automated collection, screening, and backtesting of K
 | **Historical Data** | 15+ years of data (2011-present) for KOSPI, KOSDAQ, KODEX |
 
 ## Quick Start
+```bash
 # Install
 pip install -r requirements.txt
 
