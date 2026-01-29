@@ -1,0 +1,42 @@
+# Config with API keys
+config.json
+
+# Database files
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Logs
+*.log
+*.json.log
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+ENV/
+.env
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Backtest results (optional - remove if you want to track)
+backtest_*.csv
+screening_results_*.xlsx
+
+# Progress files
+.etl_progress.json
+
+# Claude
+.claude/

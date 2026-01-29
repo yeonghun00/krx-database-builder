@@ -1,0 +1,65 @@
+{
+  "database": {
+    "path": "krx_stock_data.db",
+    "backup_enabled": true,
+    "backup_interval_days": 7,
+    "max_log_entries": 10000,
+    "cleanup_old_data_days": 3650
+  },
+  "api": {
+    "auth_key": "YOUR_KRX_API_KEY_HERE",
+    "base_url": "https://data-dbg.krx.co.kr/svc/apis/sto/stk_bydd_trd",
+    "request_delay": 1.0,
+    "timeout": 30,
+    "max_retries": 3,
+    "retry_delay": 60,
+    "backfill_request_delay": 0.5,
+    "max_concurrent_requests": 3,
+    "enable_parallel_processing": true
+  },
+  "processing": {
+    "validate_stock_codes": true,
+    "validate_dates": true,
+    "validate_numeric_fields": true,
+    "calculate_derived_fields": true,
+    "remove_duplicates": true,
+    "data_quality_threshold": 0.8
+  },
+  "update": {
+    "update_time": "18:00",
+    "enable_weekend_updates": false,
+    "max_concurrent_updates": 1,
+    "batch_size": 1000,
+    "enable_notifications": false,
+    "notification_email": ""
+  },
+  "backfill": {
+    "start_year": 2011,
+    "recent_years_threshold": 3,
+    "monthly_snapshot_enabled": true,
+    "daily_recent_enabled": true,
+    "gap_filling_enabled": true,
+    "max_backfill_days": 3650
+  },
+  "logging": {
+    "level": "INFO",
+    "console": true,
+    "file": true,
+    "json_file": false,
+    "log_file": "krx_data_manager.log",
+    "json_log_file": "krx_data_manager.json",
+    "max_file_size": 10485760,
+    "backup_count": 5,
+    "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  },
+  "monitoring": {
+    "health_check_interval": 3600,
+    "performance_monitoring": true,
+    "alert_on_failure": true,
+    "alert_email": "",
+    "disk_space_warning_gb": 5.0,
+    "disk_space_critical_gb": 1.0,
+    "memory_warning_percent": 80.0,
+    "memory_critical_percent": 90.0
+  }
+}

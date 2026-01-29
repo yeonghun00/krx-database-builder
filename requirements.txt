@@ -1,0 +1,29 @@
+# Core dependencies for KRX Stock Data Manager
+
+# HTTP requests and API handling
+requests>=2.25.0
+
+# System monitoring and process management
+psutil>=5.8.0
+
+# Scheduling and automation
+schedule>=1.1.0
+
+# Data processing and validation
+python-dateutil>=2.8.0
+
+# Configuration and data serialization
+pyyaml>=5.4.0
+
+# Optional: Enhanced JSON handling
+orjson>=3.6.0; platform_system!="Windows"  # Faster JSON for Unix systems
+
+# Development and testing (optional)
+pytest>=6.2.0
+pytest-cov>=2.12.0
+black>=21.0.0
+flake8>=3.9.0
+
+# Documentation (optional)
+sphinx>=4.0.0
+sphinx-rtd-theme>=0.5.0
