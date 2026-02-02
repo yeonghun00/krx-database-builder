@@ -3,6 +3,15 @@
 # HTTP requests and API handling
 requests>=2.25.0
 
+# Data processing
+pandas>=1.3.0
+numpy>=1.20.0
+openpyxl>=3.0.0
+
+# Machine Learning (for ML Factor Model)
+lightgbm>=3.3.0
+scikit-learn>=1.0.0
+
 # System monitoring and process management
 psutil>=5.8.0
 

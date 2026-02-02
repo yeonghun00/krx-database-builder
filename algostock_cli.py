@@ -203,11 +203,24 @@ def cmd_etl_verify(args):
     anomalies = cursor.fetchall()
     dates_to_fix = []
 
+    # First, collect ALL dates that need fixing
+    for date, cnt, kospi, kosdaq, kodex in anomalies:
+        missing = []
+        if kospi == 0:
+            missing.append('kospi')
+        if kosdaq == 0:
+            missing.append('kosdaq')
+        if kodex == 0:
+            missing.append('kodex')
+        if missing:
+            dates_to_fix.append((date, missing))
+
     if anomalies:
         print(f"Found {len(anomalies)} dates with low record counts:")
         print(f"{'Date':<12} {'Total':>8} {'KOSPI':>8} {'KOSDAQ':>8} {'KODEX':>8} {'Missing'}")
         print("-" * 70)
-        for date, cnt, kospi, kosdaq, kodex in anomalies[:30]:  # Show max 30
+        # Display only first 30 for readability
+        for date, cnt, kospi, kosdaq, kodex in anomalies[:30]:
             missing = []
             if kospi == 0:
                 missing.append('kospi')
@@ -215,8 +228,6 @@ def cmd_etl_verify(args):
                 missing.append('kosdaq')
             if kodex == 0:
                 missing.append('kodex')
-            if missing:
-                dates_to_fix.append((date, missing))
             print(f"{date:<12} {cnt:>8,} {kospi:>8,} {kosdaq:>8,} {kodex:>8,} {','.join(missing)}")
 
         if len(anomalies) > 30:
@@ -291,6 +302,177 @@ def cmd_etl_verify(args):
 
     elif args.fix and not dates_to_fix:
         print("\nNothing to fix!")
+
+
+# =============================================================================
+# Index ETL Commands
+# =============================================================================
+
+def validate_index_types(index_types_str: str) -> list:
+    """Validate index types list."""
+    valid_types = ['kospi_index', 'kosdaq_index', 'bond_index', 'govt_bond', 'derivatives']
+    types = [t.strip().lower() for t in index_types_str.split(',')]
+
+    for t in types:
+        if t not in valid_types:
+            raise argparse.ArgumentTypeError(
+                f"Invalid index type: {t}. Valid types: {', '.join(valid_types)}"
+            )
+    return types
+
+
+def cmd_index_status(args):
+    """Show index data status."""
+    from index_etl import IndexETLPipeline
+
+    with IndexETLPipeline(args.db_path) as pipeline:
+        pipeline.init_tables()
+        stats = pipeline.get_stats()
+
+        print("\n" + "=" * 60)
+        print("MARKET INDEX DATA STATUS")
+        print("=" * 60)
+
+        for table, info in stats.items():
+            print(f"\n{table}:")
+            print(f"  Records:      {info['count']:,}")
+            print(f"  Unique dates: {info['unique_dates']:,}")
+            if info['min_date'] and info['max_date']:
+                print(f"  Date range:   {info['min_date']} to {info['max_date']}")
+            else:
+                print(f"  Date range:   No data")
+
+        # Show sample index names
+        print("\n" + "-" * 60)
+        kospi_indices = pipeline.get_market_index_names('KOSPI')
+        if kospi_indices:
+            print(f"KOSPI Indices: {len(kospi_indices)} total")
+
+        kosdaq_indices = pipeline.get_market_index_names('KOSDAQ')
+        if kosdaq_indices:
+            print(f"KOSDAQ Indices: {len(kosdaq_indices)} total")
+
+        bond_indices = pipeline.get_bond_index_names()
+        if bond_indices:
+            print(f"Bond Indices: {len(bond_indices)} total")
+
+        deriv_indices = pipeline.get_derivative_index_names()
+        if deriv_indices:
+            print(f"Derivative Indices: {len(deriv_indices)} total")
+
+
+def cmd_index_backfill(args):
+    """Run index data backfill."""
+    from index_etl import IndexETLPipeline
+    from krx_api import KRXAPI
+    from config import load_config
+
+    config_dict = load_config()
+    api = KRXAPI(config_dict['api']['auth_key'], config_dict.get('api', {}))
+
+    print(f"Starting index backfill from {args.start_date} to {args.end_date}")
+    print(f"Index types: {', '.join(args.index_types)}")
+    if args.force:
+        print("Force mode enabled - will reprocess existing data")
+
+    with IndexETLPipeline(args.db_path) as pipeline:
+        pipeline.init_tables()
+
+        # Generate trading dates
+        from datetime import datetime, timedelta
+        start = datetime.strptime(args.start_date, '%Y%m%d')
+        end = datetime.strptime(args.end_date, '%Y%m%d')
+
+        dates = []
+        current = start
+        while current <= end:
+            if current.weekday() < 5:
+                dates.append(current.strftime('%Y%m%d'))
+            current += timedelta(days=1)
+
+        # Get existing dates if not forcing
+        if not args.force:
+            existing = pipeline.get_existing_dates(args.start_date, args.end_date, 'market_indices')
+            dates = [d for d in dates if d not in existing]
+            print(f"Skipping {len(existing)} dates with existing data")
+
+        if not dates:
+            print("No dates to process. Use --force to reprocess existing data.")
+            return
+
+        print(f"Processing {len(dates)} trading dates...")
+
+        processed = 0
+        total_records = {t: 0 for t in args.index_types}
+
+        for i, date in enumerate(dates):
+            try:
+                print(f"[{i+1}/{len(dates)}] Processing {date}...")
+                index_data = api.fetch_index_data_parallel(date, args.index_types, is_backfill=True)
+                results = pipeline.process_all_index_data(index_data)
+
+                for idx_type, count in results.items():
+                    total_records[idx_type] = total_records.get(idx_type, 0) + count
+
+                processed += 1
+
+            except Exception as e:
+                print(f"  Error: {e}")
+                continue
+
+        print("\n" + "=" * 60)
+        print(f"Backfill completed. Processed {processed} dates.")
+        for idx_type, count in total_records.items():
+            print(f"  {idx_type}: {count:,} records")
+
+
+def cmd_index_update(args):
+    """Run daily index data update."""
+    from index_etl import IndexETLPipeline
+    from krx_api import KRXAPI
+    from config import load_config
+
+    config_dict = load_config()
+    api = KRXAPI(config_dict['api']['auth_key'], config_dict.get('api', {}))
+
+    # Determine date
+    if args.date:
+        date = args.date
+    else:
+        from datetime import datetime, timedelta
+        yesterday = datetime.now() - timedelta(days=1)
+        date = yesterday.strftime('%Y%m%d')
+
+    # Check if weekday
+    from datetime import datetime
+    dt = datetime.strptime(date, '%Y%m%d')
+    if dt.weekday() >= 5:
+        print(f"{date} is a weekend, skipping")
+        return
+
+    print(f"Running index update for {date}")
+    print(f"Index types: {', '.join(args.index_types)}")
+
+    with IndexETLPipeline(args.db_path) as pipeline:
+        pipeline.init_tables()
+
+        # Check if data exists
+        if not args.force and pipeline.check_date_exists(date, 'market_indices'):
+            print(f"Data already exists for {date}. Use --force to reprocess.")
+            return
+
+        try:
+            index_data = api.fetch_index_data_parallel(date, args.index_types, is_backfill=False)
+            results = pipeline.process_all_index_data(index_data)
+
+            print("Processed:")
+            for idx_type, count in results.items():
+                if count > 0:
+                    print(f"  {idx_type}: {count} records")
+
+        except Exception as e:
+            print(f"Error: {e}")
+            sys.exit(1)
 
 
 def cmd_etl_backfill(args):
@@ -607,6 +789,163 @@ def cmd_quick(args):
 
 
 # =============================================================================
+# ML Commands
+# =============================================================================
+
+def cmd_ml_backtest(args):
+    """Run ML factor model backtest."""
+    from ml.backtest import MLBacktester
+
+    print("=" * 70)
+    print("ML FACTOR RANKING MODEL BACKTEST")
+    print("=" * 70)
+    print(f"Period: {args.start_date} to {args.end_date}")
+    print(f"Config: {args.n_stocks} stocks, {args.holding_days}d holding, {args.train_years}y training")
+    print(f"Model: {args.model_type}, Weighting: {args.weighting}")
+    print(f"Markets: {', '.join(args.markets)}")
+    print()
+
+    bt = MLBacktester(args.db_path)
+    results = bt.run_backtest(
+        start_date=args.start_date,
+        end_date=args.end_date,
+        n_stocks=args.n_stocks,
+        holding_days=args.holding_days,
+        train_years=args.train_years,
+        target_horizon=args.target_horizon,
+        weighting=args.weighting,
+        markets=args.markets,
+        model_type=args.model_type
+    )
+
+    bt.print_results(results)
+
+    if args.plot:
+        print("\nGenerating performance charts...")
+        chart_path = bt.plot_results(results)
+        print(f"Chart saved to: {chart_path}")
+
+    if args.export:
+        filepath = bt.export_results()
+        print(f"\nExported to: {filepath}")
+
+
+def cmd_ml_predict(args):
+    """Get current ML stock picks."""
+    from ml.backtest import MLBacktester
+
+    print("=" * 70)
+    print("ML STOCK RANKING - CURRENT PICKS")
+    print("=" * 70)
+
+    # Need to train model first via backtest
+    bt = MLBacktester(args.db_path)
+
+    # Run quick training on recent data
+    train_end = args.date or datetime.now().strftime('%Y%m%d')
+    train_start = str(int(train_end[:4]) - args.train_years) + train_end[4:]
+
+    print(f"Training on {train_start} to {train_end}...")
+    print()
+
+    results = bt.run_backtest(
+        start_date=train_start,
+        end_date=train_end,
+        n_stocks=args.n_stocks,
+        train_years=args.train_years,
+        markets=args.markets,
+        model_type='regressor'
+    )
+
+    # Get current picks
+    try:
+        picks = bt.get_current_picks(args.date, args.n_stocks)
+
+        if len(picks) == 0:
+            print("No picks available for the specified date.")
+            return
+
+        print(f"TOP {args.n_stocks} STOCKS BY ML SCORE")
+        print("-" * 70)
+        print(f"{'Rank':<6} {'Code':<8} {'Name':<15} {'Price':>10} {'Score':>8} {'Mom12m':>8}")
+        print("-" * 70)
+
+        for i, (_, row) in enumerate(picks.iterrows(), 1):
+            name = row['name'][:14] if len(row['name']) > 14 else row['name']
+            mom = row.get('mom_12m', 0) or 0
+            print(f"{i:<6} {row['stock_code']:<8} {name:<15} "
+                  f"{row['closing_price']:>10,} {row['ml_score']:>8.3f} {mom:>7.1%}")
+
+        if args.export:
+            filepath = f"ml_picks_{train_end}.csv"
+            picks.to_csv(filepath, index=False)
+            print(f"\nExported to: {filepath}")
+
+    except Exception as e:
+        print(f"Error getting picks: {e}")
+        print("Run 'ml backtest' first to train the model.")
+
+
+def cmd_ml_features(args):
+    """Show feature importance from trained model."""
+    from ml.backtest import MLBacktester
+
+    print("=" * 70)
+    print("ML FEATURE IMPORTANCE ANALYSIS")
+    print("=" * 70)
+
+    bt = MLBacktester(args.db_path)
+
+    # Quick training
+    train_end = datetime.now().strftime('%Y%m%d')
+    train_start = str(int(train_end[:4]) - 5) + train_end[4:]
+
+    print(f"Training model on {train_start} to {train_end}...")
+    print()
+
+    results = bt.run_backtest(
+        start_date=train_start,
+        end_date=train_end,
+        train_years=5,
+        markets=args.markets,
+        model_type='regressor'
+    )
+
+    if not bt.models:
+        print("No model trained.")
+        return
+
+    # Get feature importance
+    latest_model = list(bt.models.values())[-1]
+    importance = latest_model.feature_importance()
+
+    print("FEATURE IMPORTANCE (by gain)")
+    print("-" * 50)
+
+    max_imp = importance['importance'].max()
+    for _, row in importance.iterrows():
+        bar_len = int(row['importance'] / max_imp * 30)
+        bar = "█" * bar_len
+        print(f"{row['feature']:<25} {bar} {row['importance']:.0f}")
+
+    # Interpretation
+    top_feature = importance.iloc[0]['feature']
+    print("\n" + "-" * 50)
+    print("INTERPRETATION:")
+
+    if 'mom' in top_feature.lower():
+        print("→ Momentum-driven alpha: Trend following is key")
+    elif 'turnover' in top_feature.lower() or 'vol' in top_feature.lower():
+        print("→ Liquidity-driven alpha: Volume patterns predict moves")
+    elif 'market_cap' in top_feature.lower():
+        print("→ Size-driven alpha: Small-cap premium is significant")
+    elif 'volatility' in top_feature.lower():
+        print("→ Low-volatility alpha: Risk-adjusted returns matter")
+    else:
+        print(f"→ Top signal: {top_feature}")
+
+
+# =============================================================================
 # Backtest Commands
 # =============================================================================
 
@@ -658,12 +997,18 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # ETL Operations
+  # ETL Operations (Stock Data)
   algostock etl status                              Show database status
   algostock etl backfill -s 20200101 -e 20251231    Backfill historical data
   algostock etl update                              Update yesterday's data
   algostock etl update --catchup                    Auto catch-up to yesterday
   algostock etl validate                            Validate data integrity
+
+  # Index Data (KOSPI/KOSDAQ indices, Bonds, Derivatives)
+  algostock index status                            Show index data status
+  algostock index backfill -s 20200101 -e 20241231  Backfill index data
+  algostock index update                            Update yesterday's index data
+  algostock index backfill -s 20240101 -e 20240131 -t kospi_index,kosdaq_index
 
   # Stock Analysis
   algostock analyze price -s 20250101 -e 20251231 -p 1    Top 1% by price
@@ -673,9 +1018,13 @@ Examples:
   # Quick Analysis
   algostock quick -p 5                              Top 5% for current year
 
-  # Backtesting
+  # Backtesting (Simple)
   algostock backtest -s 20150101 -e 20241231 -n 5   Backtest top 5 stocks
-  algostock backtest -s 20150101 -e 20241231 -n 10 --hold-months 6 --rebalance-months 6 -w value
+
+  # ML Factor Model
+  algostock ml backtest -s 20160101 -e 20251231     ML backtest (walk-forward)
+  algostock ml predict -n 20                        Get top 20 stocks by ML score
+  algostock ml features                             Show feature importance
         """
     )
 
@@ -731,6 +1080,37 @@ Examples:
                             help='Markets (comma-separated)')
     etl_update.add_argument('--force', action='store_true', help='Force reprocess existing data')
     etl_update.set_defaults(func=cmd_etl_update)
+
+    # -------------------------------------------------------------------------
+    # Index Commands (KOSPI/KOSDAQ indices, bonds, derivatives)
+    # -------------------------------------------------------------------------
+    index_parser = subparsers.add_parser('index', help='Market index data operations')
+    index_subparsers = index_parser.add_subparsers(dest='index_command', help='Index commands')
+
+    # index status
+    index_status = index_subparsers.add_parser('status', help='Show index data status')
+    index_status.set_defaults(func=cmd_index_status)
+
+    # index backfill
+    index_backfill = index_subparsers.add_parser('backfill', help='Backfill historical index data')
+    index_backfill.add_argument('-s', '--start-date', type=validate_date, required=True,
+                                help='Start date (YYYYMMDD)')
+    index_backfill.add_argument('-e', '--end-date', type=validate_date, required=True,
+                                help='End date (YYYYMMDD)')
+    index_backfill.add_argument('-t', '--index-types', type=validate_index_types,
+                                default='kospi_index,kosdaq_index,bond_index,govt_bond,derivatives',
+                                help='Index types (comma-separated): kospi_index,kosdaq_index,bond_index,govt_bond,derivatives')
+    index_backfill.add_argument('--force', action='store_true', help='Force reprocess existing data')
+    index_backfill.set_defaults(func=cmd_index_backfill)
+
+    # index update
+    index_update = index_subparsers.add_parser('update', help='Run daily index update')
+    index_update.add_argument('--date', type=validate_date, help='Specific date (YYYYMMDD)')
+    index_update.add_argument('-t', '--index-types', type=validate_index_types,
+                              default='kospi_index,kosdaq_index,bond_index,govt_bond,derivatives',
+                              help='Index types (comma-separated)')
+    index_update.add_argument('--force', action='store_true', help='Force reprocess existing data')
+    index_update.set_defaults(func=cmd_index_update)
 
     # -------------------------------------------------------------------------
     # Analysis Commands
@@ -812,6 +1192,57 @@ Examples:
     backtest_parser.set_defaults(func=cmd_backtest)
 
     # -------------------------------------------------------------------------
+    # ML Commands
+    # -------------------------------------------------------------------------
+    ml_parser = subparsers.add_parser('ml', help='ML factor ranking model')
+    ml_subparsers = ml_parser.add_subparsers(dest='ml_command', help='ML commands')
+
+    # ml backtest
+    ml_backtest = ml_subparsers.add_parser('backtest', help='Run ML factor model backtest')
+    ml_backtest.add_argument('-s', '--start-date', type=validate_date, required=True,
+                             help='Backtest start date (YYYYMMDD)')
+    ml_backtest.add_argument('-e', '--end-date', type=validate_date, required=True,
+                             help='Backtest end date (YYYYMMDD)')
+    ml_backtest.add_argument('-n', '--n-stocks', type=int, default=20,
+                             help='Number of stocks to hold (default: 20)')
+    ml_backtest.add_argument('--holding-days', type=int, default=21,
+                             help='Holding period in days (default: 21 = ~1 month)')
+    ml_backtest.add_argument('--train-years', type=int, default=5,
+                             help='Years of data for training (default: 5)')
+    ml_backtest.add_argument('--target-horizon', type=int, default=21,
+                             help='Forward return horizon in days (default: 21)')
+    ml_backtest.add_argument('-w', '--weighting', default='equal',
+                             choices=['equal', 'score', 'mcap'],
+                             help='Portfolio weighting (default: equal)')
+    ml_backtest.add_argument('--model-type', default='regressor',
+                             choices=['ranker', 'regressor'],
+                             help='Model type (default: regressor)')
+    ml_backtest.add_argument('-m', '--markets', type=validate_markets, default='kospi,kosdaq',
+                             help='Markets (comma-separated)')
+    ml_backtest.add_argument('--plot', action='store_true', help='Generate performance charts')
+    ml_backtest.add_argument('--export', action='store_true', help='Export results to CSV')
+    ml_backtest.set_defaults(func=cmd_ml_backtest)
+
+    # ml predict
+    ml_predict = ml_subparsers.add_parser('predict', help='Get current ML stock picks')
+    ml_predict.add_argument('-n', '--n-stocks', type=int, default=20,
+                            help='Number of stocks to return (default: 20)')
+    ml_predict.add_argument('--date', type=validate_date,
+                            help='Date for prediction (default: most recent)')
+    ml_predict.add_argument('--train-years', type=int, default=5,
+                            help='Years of data for training (default: 5)')
+    ml_predict.add_argument('-m', '--markets', type=validate_markets, default='kospi,kosdaq',
+                            help='Markets (comma-separated)')
+    ml_predict.add_argument('--export', action='store_true', help='Export picks to CSV')
+    ml_predict.set_defaults(func=cmd_ml_predict)
+
+    # ml features
+    ml_features = ml_subparsers.add_parser('features', help='Show feature importance')
+    ml_features.add_argument('-m', '--markets', type=validate_markets, default='kospi,kosdaq',
+                             help='Markets (comma-separated)')
+    ml_features.set_defaults(func=cmd_ml_features)
+
+    # -------------------------------------------------------------------------
     # Parse and Execute
     # -------------------------------------------------------------------------
     args = parser.parse_args()
@@ -831,6 +1262,14 @@ Examples:
 
     if args.command == 'analyze' and not getattr(args, 'analyze_command', None):
         analyze_parser.print_help()
+        sys.exit(1)
+
+    if args.command == 'ml' and not getattr(args, 'ml_command', None):
+        ml_parser.print_help()
+        sys.exit(1)
+
+    if args.command == 'index' and not getattr(args, 'index_command', None):
+        index_parser.print_help()
         sys.exit(1)
 
     # Execute command

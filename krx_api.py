@@ -53,11 +53,20 @@ class KRXAPI:
         self.enable_parallel_processing = cfg['enable_parallel_processing']
         self._rate_limit_lock = threading.Lock()
 
-        # Market endpoints for KRX data
+        # Market endpoints for KRX data (stock trading)
         self.market_endpoints = {
             'kospi': 'https://data-dbg.krx.co.kr/svc/apis/sto/stk_bydd_trd',
             'kosdaq': 'https://data-dbg.krx.co.kr/svc/apis/sto/ksq_bydd_trd',
             'kodex': 'https://data-dbg.krx.co.kr/svc/apis/sto/knx_bydd_trd'
+        }
+
+        # Index endpoints for market indices, bonds, and derivatives
+        self.index_endpoints = {
+            'kospi_index': 'https://data-dbg.krx.co.kr/svc/apis/idx/kospi_dd_trd',
+            'kosdaq_index': 'https://data-dbg.krx.co.kr/svc/apis/idx/kosdaq_dd_trd',
+            'bond_index': 'https://data-dbg.krx.co.kr/svc/apis/idx/bon_dd_trd.json',
+            'govt_bond': 'https://data-dbg.krx.co.kr/svc/apis/bon/kts_bydd_trd',
+            'derivatives': 'https://data-dbg.krx.co.kr/svc/apis/idx/drvprod_dd_trd'
         }
     
     def _make_request(self, date: str, market: str = 'kospi') -> Optional[Dict]:
@@ -588,11 +597,170 @@ class KRXAPI:
     def fetch_all_markets_for_date(self, date: str) -> Dict[str, List[Dict]]:
         """
         Fetch data from all three markets for a specific date.
-        
+
         Args:
             date (str): Date in YYYYMMDD format
-            
+
         Returns:
             Dict[str, List[Dict]]: Dictionary with market names as keys and data as values
         """
         return self.fetch_data_for_date_multi_market(date, ['kospi', 'kosdaq', 'kodex'])
+
+    # ============================================================
+    # Index Data Methods (KOSPI/KOSDAQ indices, Bonds, Derivatives)
+    # ============================================================
+
+    def _make_index_request(self, date: str, index_type: str, is_backfill: bool = False) -> Optional[Dict]:
+        """
+        Make API request for index data with rate limiting.
+
+        Args:
+            date (str): Date in YYYYMMDD format
+            index_type (str): One of 'kospi_index', 'kosdaq_index', 'bond_index', 'govt_bond', 'derivatives'
+            is_backfill (bool): Whether this is a backfill operation
+
+        Returns:
+            Optional[Dict]: API response data or None if failed
+        """
+        if index_type not in self.index_endpoints:
+            self.logger.error(f"Unsupported index type: {index_type}")
+            return None
+
+        base_url = self.index_endpoints[index_type]
+
+        # Use optimized rate limiting for backfill
+        delay = self.backfill_request_delay if is_backfill else self.request_delay
+
+        # Thread-safe rate limiting
+        with self._rate_limit_lock:
+            current_time = time.time()
+            time_since_last = current_time - self.last_request_time
+            if time_since_last < delay:
+                time.sleep(delay - time_since_last)
+
+        params = {"basDd": date}
+
+        try:
+            self.logger.info(f"Making API request for {index_type}, date: {date}")
+            response = requests.get(base_url, headers=self.headers, params=params, timeout=30)
+
+            with self._rate_limit_lock:
+                self.last_request_time = time.time()
+
+            if response.status_code == 200:
+                try:
+                    data = response.json()
+                    self.logger.info(f"Successfully fetched {index_type} data for {date}")
+                    return data
+                except json.JSONDecodeError as e:
+                    self.logger.error(f"JSON decode error for {index_type}, date {date}: {e}")
+                    return None
+            else:
+                self.logger.error(f"API request failed for {index_type}, {date}: HTTP {response.status_code}")
+                self.logger.error(f"Response: {response.text}")
+                return None
+
+        except requests.exceptions.RequestException as e:
+            self.logger.error(f"Request exception for {index_type}, date {date}: {e}")
+            return None
+        except Exception as e:
+            self.logger.error(f"Unexpected error for {index_type}, date {date}: {e}")
+            return None
+
+    def fetch_index_data(self, date: str, index_type: str, is_backfill: bool = False) -> List[Dict]:
+        """
+        Fetch index data for a specific date.
+
+        Args:
+            date (str): Date in YYYYMMDD format
+            index_type (str): One of 'kospi_index', 'kosdaq_index', 'bond_index', 'govt_bond', 'derivatives'
+            is_backfill (bool): Whether this is a backfill operation
+
+        Returns:
+            List[Dict]: List of index data records from OutBlock_1
+        """
+        data = self._make_index_request(date, index_type, is_backfill)
+
+        if not data:
+            return []
+
+        if "OutBlock_1" not in data:
+            self.logger.error(f"Invalid response structure for {index_type}, date {date}")
+            return []
+
+        records = data["OutBlock_1"]
+        self.logger.info(f"Fetched {len(records)} records for {index_type}, date {date}")
+        return records
+
+    def fetch_all_index_data(self, date: str, is_backfill: bool = False) -> Dict[str, List[Dict]]:
+        """
+        Fetch all index data types for a specific date.
+
+        Args:
+            date (str): Date in YYYYMMDD format
+            is_backfill (bool): Whether this is a backfill operation
+
+        Returns:
+            Dict[str, List[Dict]]: Dictionary with index type as key and records as value
+        """
+        result = {}
+        for index_type in self.index_endpoints.keys():
+            try:
+                result[index_type] = self.fetch_index_data(date, index_type, is_backfill)
+            except Exception as e:
+                self.logger.error(f"Failed to fetch {index_type} for {date}: {e}")
+                result[index_type] = []
+        return result
+
+    def fetch_index_data_parallel(self, date: str, index_types: List[str] = None, is_backfill: bool = False) -> Dict[str, List[Dict]]:
+        """
+        Fetch multiple index data types for a specific date in parallel.
+
+        Args:
+            date (str): Date in YYYYMMDD format
+            index_types (List[str], optional): List of index types to fetch. If None, fetches all.
+            is_backfill (bool): Whether this is a backfill operation
+
+        Returns:
+            Dict[str, List[Dict]]: Dictionary with index type as key and records as value
+        """
+        if index_types is None:
+            index_types = list(self.index_endpoints.keys())
+
+        if not self.enable_parallel_processing or len(index_types) == 1:
+            # Fall back to sequential processing
+            result = {}
+            for index_type in index_types:
+                result[index_type] = self.fetch_index_data(date, index_type, is_backfill)
+            return result
+
+        results = {}
+        futures = {}
+
+        with ThreadPoolExecutor(max_workers=self.max_concurrent_requests) as executor:
+            for index_type in index_types:
+                future = executor.submit(self._make_index_request, date, index_type, is_backfill)
+                futures[future] = index_type
+
+        for future in as_completed(futures):
+            index_type = futures[future]
+            try:
+                data = future.result()
+                if not data:
+                    results[index_type] = []
+                    continue
+
+                if "OutBlock_1" not in data:
+                    self.logger.error(f"Invalid response structure for {index_type}, date {date}")
+                    results[index_type] = []
+                    continue
+
+                records = data["OutBlock_1"]
+                results[index_type] = records
+                self.logger.info(f"Fetched {len(records)} records for {index_type}, date {date}")
+
+            except Exception as e:
+                self.logger.error(f"Error processing {index_type} data for {date}: {e}")
+                results[index_type] = []
+
+        return results
