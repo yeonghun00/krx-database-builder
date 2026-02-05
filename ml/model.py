@@ -21,28 +21,30 @@ class MLRanker:
         'ndcg_eval_at': [10, 20, 50],
         'boosting_type': 'gbdt',
         'num_leaves': 31,
-        'learning_rate': 0.05,
+        'learning_rate': 0.1,  # 0.05 → 0.1 (faster convergence)
         'feature_fraction': 0.8,
         'bagging_fraction': 0.8,
         'bagging_freq': 5,
         'min_data_in_leaf': 20,
         'verbose': -1,
-        'n_estimators': 500,
+        'n_estimators': 200,  # 500 → 200 (sufficient)
+        'n_jobs': -1,  # Parallel training
         'seed': 42
     }
 
-    # Alternative: Regression-based ranking
+    # Alternative: Regression-based ranking (optimized for speed)
     REGRESSION_PARAMS = {
         'objective': 'regression',
         'metric': 'mse',
         'boosting_type': 'gbdt',
         'num_leaves': 31,
-        'learning_rate': 0.05,
+        'learning_rate': 0.1,  # 0.05 → 0.1 (faster convergence)
         'feature_fraction': 0.8,
         'bagging_fraction': 0.8,
         'bagging_freq': 5,
         'verbose': -1,
-        'n_estimators': 500,
+        'n_estimators': 200,  # 500 → 200 (sufficient)
+        'n_jobs': -1,  # Parallel training
         'seed': 42
     }
 
@@ -99,7 +101,7 @@ class MLRanker:
         return weights.values
 
     def train(self, train_df: pd.DataFrame, val_df: pd.DataFrame = None,
-              params: Dict = None) -> 'MLRanker':
+              params: Dict = None, sample_weight: np.ndarray = None) -> 'MLRanker':
         """
         Train the model.
 
@@ -107,11 +109,12 @@ class MLRanker:
             train_df: Training data with features and target
             val_df: Validation data (optional)
             params: Model parameters (optional)
+            sample_weight: V4.3 custom sample weights (optional, multiplied with time decay)
         """
         if self.model_type == 'ranker':
             return self._train_ranker(train_df, val_df, params)
         else:
-            return self._train_regressor(train_df, val_df, params)
+            return self._train_regressor(train_df, val_df, params, sample_weight)
 
     def _train_ranker(self, train_df: pd.DataFrame, val_df: pd.DataFrame = None,
                       params: Dict = None) -> 'MLRanker':
@@ -160,7 +163,7 @@ class MLRanker:
         return self
 
     def _train_regressor(self, train_df: pd.DataFrame, val_df: pd.DataFrame = None,
-                         params: Dict = None) -> 'MLRanker':
+                         params: Dict = None, sample_weight: np.ndarray = None) -> 'MLRanker':
         """Train regression model with time-decay weighting."""
         params = params or self.REGRESSION_PARAMS.copy()
 
@@ -168,11 +171,20 @@ class MLRanker:
         y_train = train_df[self.target_col].values
 
         # Calculate time-based sample weights (recent = higher)
-        weights = self._calculate_time_weights(train_df)
+        time_weights = self._calculate_time_weights(train_df)
+
+        # V4.3: Combine time weights with custom sample weights
+        if sample_weight is not None and time_weights is not None:
+            weights = time_weights * sample_weight
+            weights = weights / weights.mean()  # Normalize
+        elif sample_weight is not None:
+            weights = sample_weight
+        else:
+            weights = time_weights
 
         train_data = lgb.Dataset(
             X_train, label=y_train,
-            weight=weights,  # Time decay weights
+            weight=weights,
             feature_name=self.feature_cols
         )
 

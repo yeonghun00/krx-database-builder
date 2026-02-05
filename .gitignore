@@ -38,5 +38,8 @@ screening_results_*.xlsx
 # Progress files
 .etl_progress.json
 
+# Feature cache
+.cache/
+
 # Claude
 .claude/

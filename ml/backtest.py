@@ -53,6 +53,29 @@ class MLBacktester:
         self.logger.info(f"Loaded {len(df)} benchmark (KODEX 200) data points")
         return benchmark_dict
 
+    def _validate_market_data(self, df: pd.DataFrame, start_date: str, end_date: str) -> bool:
+        """Validate that market data is complete and consistent."""
+        if len(df) == 0:
+            self.logger.error("No market data available")
+            return False
+
+        # Check for missing dates
+        all_dates = pd.date_range(start=start_date, end=end_date, freq='D')
+        trading_dates = pd.to_datetime(df['date'].unique(), format='%Y%m%d')
+        missing_dates = all_dates[~all_dates.isin(trading_dates)]
+
+        if len(missing_dates) > 0:
+            self.logger.warning(f"Missing market data for {len(missing_dates)} dates")
+
+        # Check for missing values in key columns
+        key_cols = ['closing_price', 'volume', 'market_cap']
+        missing_values = df[key_cols].isna().sum().sum()
+
+        if missing_values > 0:
+            self.logger.warning(f"Found {missing_values} missing values in key columns")
+
+        return True
+
     def run_backtest(
         self,
         start_date: str,
@@ -97,12 +120,12 @@ class MLBacktester:
         # Prepare data
         self.logger.info("Preparing ML data...")
         df = self.feature_engineer.prepare_ml_data(
-            start_date, end_date, target_horizon, markets,
-            min_market_cap=min_market_cap, min_value=min_value
+            start_date, end_date, target_horizon,
+            min_market_cap=min_market_cap
         )
-
-        if len(df) == 0:
-            self.logger.error("No data available for backtest")
+        # Filter by markets if specified
+        if markets:
+            df = df[df["market_type"].isin(markets)]
             return {}
 
         feature_cols = FeatureEngineer.FEATURE_COLUMNS

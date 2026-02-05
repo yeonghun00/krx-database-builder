@@ -213,36 +213,30 @@ class FinancialFeatureGenerator:
         # Sort by stock and fiscal_date
         pivot_ytd = pivot_ytd.sort_values(['stock_code', 'fiscal_date'])
 
-        # Calculate prev year same quarter values by shifting 4 quarters
-        # fiscal_date format: YYYY-MM-DD, same quarter = 1 year ago
+        # Calculate prev year same quarter values (vectorized)
         pivot_ytd['fiscal_date_dt'] = pd.to_datetime(pivot_ytd['fiscal_date'])
         pivot_ytd['year'] = pivot_ytd['fiscal_date_dt'].dt.year
         pivot_ytd['quarter'] = pivot_ytd['fiscal_date_dt'].dt.quarter
 
-        # Create prev year same quarter lookup
-        for col in ['revenue', 'gross_profit', 'net_income', 'operating_income']:
-            if col in pivot_ytd.columns:
-                # Merge with self to get previous year same quarter
-                prev_year_col = f'{col}_prev_year'
+        # Vectorized YoY calculation using merge instead of apply+lambda
+        pl_cols = ['revenue', 'gross_profit', 'net_income', 'operating_income']
+        pl_cols = [c for c in pl_cols if c in pivot_ytd.columns]
 
-                # Create lookup key: stock_code + quarter
-                pivot_ytd['lookup_key'] = pivot_ytd['stock_code'] + '_' + pivot_ytd['quarter'].astype(str)
-                pivot_ytd['prev_year'] = pivot_ytd['year'] - 1
-                pivot_ytd['prev_lookup_key'] = pivot_ytd['stock_code'] + '_' + pivot_ytd['quarter'].astype(str)
+        if pl_cols:
+            # Create prev year lookup table
+            prev_year_df = pivot_ytd[['stock_code', 'year', 'quarter'] + pl_cols].copy()
+            prev_year_df['year'] = prev_year_df['year'] + 1  # shift to next year for matching
+            prev_year_df = prev_year_df.rename(columns={c: f'{c}_prev_year' for c in pl_cols})
 
-                # Create a mapping of (stock, year, quarter) -> value
-                lookup = pivot_ytd.set_index(['stock_code', 'year', 'quarter'])[col].to_dict()
-
-                # Look up previous year same quarter value
-                pivot_ytd[prev_year_col] = pivot_ytd.apply(
-                    lambda row: lookup.get((row['stock_code'], row['prev_year'], row['quarter'])),
-                    axis=1
-                )
+            # Merge to get previous year values (vectorized)
+            pivot_ytd = pivot_ytd.merge(
+                prev_year_df,
+                on=['stock_code', 'year', 'quarter'],
+                how='left'
+            )
 
         # Clean up temporary columns
-        pivot_ytd = pivot_ytd.drop(columns=['fiscal_date_dt', 'year', 'quarter',
-                                             'lookup_key', 'prev_year', 'prev_lookup_key'],
-                                    errors='ignore')
+        pivot_ytd = pivot_ytd.drop(columns=['fiscal_date_dt', 'year', 'quarter'], errors='ignore')
 
         return pivot_ytd
 
@@ -340,32 +334,19 @@ class FinancialFeatureGenerator:
         fin_cols = [c for c in fin_cols if c in fin_df.columns]
         fin_subset = fin_df[fin_cols].drop_duplicates()
 
-        # Process each stock separately for merge_asof (to avoid sorting issues)
-        result_dfs = []
-        stock_codes = price_df['stock_code'].unique()
+        # Vectorized merge_asof: sort by [stock_code, date] for 'by' parameter
+        price_df = price_df.sort_values(['stock_code', 'date']).reset_index(drop=True)
+        fin_subset = fin_subset.sort_values(['stock_code', 'available_date']).reset_index(drop=True)
 
-        for stock_code in stock_codes:
-            price_stock = price_df[price_df['stock_code'] == stock_code].sort_values('date')
-            fin_stock = fin_subset[fin_subset['stock_code'] == stock_code].sort_values('available_date')
-
-            if len(fin_stock) == 0:
-                # No financial data for this stock - keep price data with nulls
-                result_dfs.append(price_stock)
-                continue
-
-            # Merge asof - joins each daily price row to the most recent
-            # financial data where available_date <= price date
-            merged_stock = pd.merge_asof(
-                price_stock,
-                fin_stock,
-                left_on='date',
-                right_on='available_date',
-                by='stock_code',
-                direction='backward'  # Only use past data
-            )
-            result_dfs.append(merged_stock)
-
-        merged = pd.concat(result_dfs, ignore_index=True)
+        # Single merge_asof call for all stocks at once
+        merged = pd.merge_asof(
+            price_df,
+            fin_subset.drop(columns=['sector'], errors='ignore'),
+            left_on='date',
+            right_on='available_date',
+            by='stock_code',
+            direction='backward'
+        )
 
         # Calculate valuation ratios (need market_cap from prices)
         # P/E = Market Cap / Net Income (TTM)
@@ -395,32 +376,27 @@ class FinancialFeatureGenerator:
                               feature_cols: List[str]) -> pd.DataFrame:
         """
         Fill null values with sector median (within same date).
-
-        Args:
-            df: DataFrame with features
-            feature_cols: List of feature columns to impute
+        Vectorized: compute all medians at once instead of column by column.
         """
         df = df.copy()
 
-        for col in feature_cols:
-            if col not in df.columns:
-                continue
+        # Filter to existing columns
+        valid_cols = [c for c in feature_cols if c in df.columns]
+        if not valid_cols:
+            return df
 
-            # Calculate sector median for each date
-            sector_medians = df.groupby(['date', 'sector_x'])[col].transform('median')
+        # Compute all sector medians at once (single groupby)
+        sector_col = 'sector_x' if 'sector_x' in df.columns else 'sector'
+        sector_medians = df.groupby(['date', sector_col])[valid_cols].transform('median')
+        market_medians = df.groupby('date')[valid_cols].transform('median')
 
-            # Fill nulls with sector median
+        # Apply imputation for all columns
+        for col in valid_cols:
             null_mask = df[col].isna()
-            df.loc[null_mask, col] = sector_medians[null_mask]
+            df.loc[null_mask, col] = sector_medians.loc[null_mask, col]
 
-            # If still null (sector has no data), use market median
-            market_medians = df.groupby('date')[col].transform('median')
             still_null = df[col].isna()
-            df.loc[still_null, col] = market_medians[still_null]
-
-            null_count = df[col].isna().sum()
-            if null_count > 0:
-                logger.warning(f"{col}: {null_count} nulls remain after imputation")
+            df.loc[still_null, col] = market_medians.loc[still_null, col]
 
         return df
 
@@ -432,16 +408,16 @@ class FinancialFeatureGenerator:
                                    feature_cols: List[str]) -> pd.DataFrame:
         """
         Create binary indicators for missing values.
-        These help the model learn that "missing" itself is informative.
+        Vectorized: compute all indicators at once.
         """
         df = df.copy()
 
-        for col in feature_cols:
-            if col not in df.columns:
-                continue
-
-            indicator_col = f'is_null_{col}'
-            df[indicator_col] = df[col].isna().astype(int)
+        # Filter to existing columns and compute all at once
+        valid_cols = [c for c in feature_cols if c in df.columns]
+        if valid_cols:
+            null_indicators = df[valid_cols].isna().astype(int)
+            null_indicators.columns = [f'is_null_{c}' for c in valid_cols]
+            df = pd.concat([df, null_indicators], axis=1)
 
         return df
 
@@ -453,33 +429,23 @@ class FinancialFeatureGenerator:
                         null_strategy: str = 'median') -> pd.DataFrame:
         """
         Calculate cross-sectional ranks with proper null handling.
-
-        Args:
-            df: DataFrame with features
-            feature_cols: List of feature columns to rank
-            null_strategy: 'median' (assign middle rank), 'bottom' (assign worst rank)
+        Vectorized: compute all ranks at once instead of column by column.
         """
         df = df.copy()
 
-        for col in feature_cols:
-            if col not in df.columns:
-                continue
+        # Filter to existing columns
+        valid_cols = [c for c in feature_cols if c in df.columns]
+        if not valid_cols:
+            return df
 
+        # Compute all ranks at once (single groupby)
+        rank_df = df.groupby('date')[valid_cols].rank(pct=True, na_option='keep')
+
+        # Assign rank columns and handle nulls
+        fill_value = 0.5 if null_strategy == 'median' else 0.0
+        for col in valid_cols:
             rank_col = f'{col}_rank'
-
-            # Calculate percentile rank (0-1) within each date
-            # na_option='keep' excludes nulls from ranking
-            df[rank_col] = df.groupby('date')[col].rank(pct=True, na_option='keep')
-
-            # Handle nulls based on strategy
-            null_mask = df[rank_col].isna()
-
-            if null_strategy == 'median':
-                # Assign middle rank (0.5) to nulls
-                df.loc[null_mask, rank_col] = 0.5
-            elif null_strategy == 'bottom':
-                # Assign worst rank (0 or 1 depending on feature direction)
-                df.loc[null_mask, rank_col] = 0.0
+            df[rank_col] = rank_df[col].fillna(fill_value)
 
         return df
 
