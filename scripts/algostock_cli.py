@@ -22,8 +22,8 @@ import sys
 import os
 from datetime import datetime, timedelta
 
-# Add the current directory to Python path
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# Add the project root directory to Python path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 def setup_logging(log_file: str = None, level: int = logging.INFO):
@@ -78,7 +78,7 @@ def validate_markets(markets_str: str) -> list:
 
 def cmd_etl_status(args):
     """Show ETL status."""
-    from clean_etl import CleanETLPipeline
+    from etl.clean_etl import CleanETLPipeline
 
     pipeline = CleanETLPipeline(args.db_path)
     status = pipeline.get_status()
@@ -95,7 +95,7 @@ def cmd_etl_status(args):
 
 def cmd_etl_validate(args):
     """Validate data integrity."""
-    from clean_etl import CleanETLPipeline
+    from etl.clean_etl import CleanETLPipeline
 
     pipeline = CleanETLPipeline(args.db_path)
     validation = pipeline.validate_data()
@@ -111,7 +111,7 @@ def cmd_etl_validate(args):
 
 def cmd_etl_cleanup(args):
     """Clean up old data."""
-    from clean_etl import CleanETLPipeline
+    from etl.clean_etl import CleanETLPipeline
 
     logger = logging.getLogger(__name__)
     logger.info(f"Cleaning up data older than {args.days} days...")
@@ -259,8 +259,8 @@ def cmd_etl_verify(args):
         print("FIXING MISSING DATA")
         print("=" * 70)
 
-        from clean_etl import CleanETLPipeline
-        from krx_api import KRXAPI
+        from etl.clean_etl import CleanETLPipeline
+        from etl.krx_api import KRXAPI
         from config import load_config
 
         config_dict = load_config()
@@ -323,7 +323,7 @@ def validate_index_types(index_types_str: str) -> list:
 
 def cmd_index_status(args):
     """Show index data status."""
-    from index_etl import IndexETLPipeline
+    from etl.index_etl import IndexETLPipeline
 
     with IndexETLPipeline(args.db_path) as pipeline:
         pipeline.init_tables()
@@ -363,8 +363,8 @@ def cmd_index_status(args):
 
 def cmd_index_backfill(args):
     """Run index data backfill."""
-    from index_etl import IndexETLPipeline
-    from krx_api import KRXAPI
+    from etl.index_etl import IndexETLPipeline
+    from etl.krx_api import KRXAPI
     from config import load_config
 
     config_dict = load_config()
@@ -428,8 +428,8 @@ def cmd_index_backfill(args):
 
 def cmd_index_update(args):
     """Run daily index data update."""
-    from index_etl import IndexETLPipeline
-    from krx_api import KRXAPI
+    from etl.index_etl import IndexETLPipeline
+    from etl.krx_api import KRXAPI
     from config import load_config
 
     config_dict = load_config()
@@ -477,8 +477,8 @@ def cmd_index_update(args):
 
 def cmd_etl_backfill(args):
     """Run historical data backfill."""
-    from clean_etl import CleanETLPipeline
-    from krx_api import KRXAPI
+    from etl.clean_etl import CleanETLPipeline
+    from etl.krx_api import KRXAPI
     from config import load_config
 
     pipeline = CleanETLPipeline(args.db_path)
@@ -582,8 +582,8 @@ def cmd_etl_backfill(args):
 
 def cmd_etl_update(args):
     """Run daily update or catch-up from last date."""
-    from clean_etl import CleanETLPipeline
-    from krx_api import KRXAPI
+    from etl.clean_etl import CleanETLPipeline
+    from etl.krx_api import KRXAPI
     from config import load_config
 
     pipeline = CleanETLPipeline(args.db_path)

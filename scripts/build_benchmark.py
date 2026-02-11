@@ -15,7 +15,12 @@ warnings.filterwarnings('ignore')
 import pandas as pd
 import numpy as np
 import sqlite3
+import sys
+from pathlib import Path
 from datetime import datetime
+
+# Add project root to Python path
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 print('=' * 70)
 print('📊 KOSPI200 유사 벤치마크 생성')

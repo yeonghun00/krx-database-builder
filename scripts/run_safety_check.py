@@ -16,8 +16,14 @@ logging.basicConfig(level=logging.WARNING)
 
 import pandas as pd
 import numpy as np
+import sys
+from pathlib import Path
 from datetime import datetime
 from scipy import stats
+
+# Add project root to Python path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 from ml.features import FeatureEngineer
 from ml.model import MLRanker
 

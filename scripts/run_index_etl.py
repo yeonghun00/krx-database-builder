@@ -23,11 +23,16 @@ import argparse
 import logging
 import json
 import os
+import sys
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import List, Set
 
-from krx_api import KRXAPI
-from index_etl import IndexETLPipeline
+# Add project root to Python path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from etl.krx_api import KRXAPI
+from etl.index_etl import IndexETLPipeline
 from config import load_config
 
 # Set up logging

@@ -17,6 +17,12 @@ logging.basicConfig(level=logging.WARNING)
 import pandas as pd
 import numpy as np
 import argparse
+import sys
+from pathlib import Path
+
+# Add project root to Python path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 from ml.features import FeatureEngineer
 from ml.model import MLRanker
 
@@ -26,6 +32,8 @@ parser.add_argument('--bottom', type=int, default=10, help='하위 N개 종목')
 parser.add_argument('--horizon', type=int, default=21, help='보유 기간 (일)')
 parser.add_argument('--qepm', action='store_true', help='🔥 QEPM 모드 (63일, Alpha, 섹터제한)')
 parser.add_argument('--max-sector', type=int, default=3, help='섹터당 최대 종목 수')
+parser.add_argument('--v7', action='store_true', help='🔥 V7 5-Pillar Only 모델')
+parser.add_argument('--no-cache', action='store_true', help='캐시 미사용 (cold run 강제)')
 args = parser.parse_args()
 
 # QEPM 모드 설정
@@ -44,6 +52,8 @@ TARGET_COL = f'target_alpha_rank_{HORIZON}d' if QEPM_MODE else f'target_rank_{HO
 print('=' * 70)
 if QEPM_MODE:
     print('🏦 V3 QEPM 오늘의 추천 종목 (기관급)')
+elif args.v7:
+    print('🔥 V7 5-Pillar Only 오늘의 추천 종목')
 else:
     print('🎯 V3 모델 오늘의 추천 종목')
 print('=' * 70)
@@ -58,7 +68,8 @@ train_df = fe.prepare_ml_data(
     end_date='20260128',
     target_horizon=HORIZON,
     min_market_cap=500_000_000_000,
-    include_fundamental=True
+    include_fundamental=True,
+    use_cache=not args.no_cache
 )
 
 # 피처
@@ -71,6 +82,12 @@ fund_features = [c for c in fe.FUNDAMENTAL_FEATURES if c in train_df.columns]
 
 all_features = (momentum_features + volume_features + volatility_features +
                 intuition_features + traditional_features + fund_features)
+
+if args.v7:
+    all_features = [c for c in fe.MODEL7_FEATURES if c in train_df.columns]
+    missing_v7 = [c for c in fe.MODEL7_FEATURES if c not in train_df.columns]
+    if missing_v7:
+        print(f'  ⚠️ Missing V7 features: {missing_v7}')
 
 # 모델 학습 (최근 데이터까지)
 print('[2/3] 모델 학습 중...')
