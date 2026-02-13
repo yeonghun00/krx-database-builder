@@ -628,12 +628,13 @@ if __name__ == "__main__":
     import sys
     import os
 
-    # Get script directory for relative paths
+    # Get project root directory for relative paths
     script_dir = Path(os.path.dirname(os.path.abspath(__file__)))
+    project_root = script_dir.parent
 
-    # Default paths (relative to script location)
-    db_path = script_dir / "krx_stock_data.db"
-    raw_data_dir = script_dir / "raw_financial"
+    # Default paths (relative to project root)
+    db_path = project_root / "krx_stock_data.db"
+    raw_data_dir = project_root / "data" / "raw_financial"
 
     if len(sys.argv) > 1:
         db_path = Path(sys.argv[1])

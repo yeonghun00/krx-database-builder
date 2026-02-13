@@ -32,6 +32,63 @@ class MLRanker:
         'seed': 42
     }
 
+    # V8: LambdaRank with early stopping (slower LR, higher cap)
+    V8_RANK_PARAMS = {
+        'objective': 'lambdarank',
+        'metric': 'ndcg',
+        'ndcg_eval_at': [10, 20, 50],
+        'boosting_type': 'gbdt',
+        'num_leaves': 31,
+        'learning_rate': 0.05,       # Slower for early stopping
+        'feature_fraction': 0.8,
+        'bagging_fraction': 0.8,
+        'bagging_freq': 5,
+        'min_data_in_leaf': 20,
+        'verbose': -1,
+        'n_estimators': 500,         # Higher cap, early stopping will cut
+        'n_jobs': -1,
+        'seed': 42,
+    }
+
+    # V9: Huber regression (robust to outliers, preserves absolute return signal)
+    V9_HUBER_PARAMS = {
+        'objective': 'huber',
+        'metric': 'huber',
+        'huber_delta': 0.5,
+        'boosting_type': 'gbdt',
+        'num_leaves': 31,
+        'learning_rate': 0.05,
+        'feature_fraction': 0.8,
+        'bagging_fraction': 0.8,
+        'bagging_freq': 5,
+        'min_data_in_leaf': 20,
+        'verbose': -1,
+        'n_estimators': 500,
+        'n_jobs': -1,
+        'seed': 42,
+    }
+
+    # V10: Z-score target, slower LR, higher cap, wider huber delta
+    V10_PARAMS = {
+        'objective': 'huber',
+        'metric': 'huber',
+        'huber_delta': 1.0,
+        'boosting_type': 'gbdt',
+        'num_leaves': 31,
+        'learning_rate': 0.01,
+        'feature_fraction': 0.8,
+        'bagging_fraction': 0.8,
+        'bagging_freq': 5,
+        'min_data_in_leaf': 20,
+        'verbose': -1,
+        'n_estimators': 1000,
+        'n_jobs': -1,
+        'seed': 42,
+    }
+
+    # V11: Sector-neutral target + risk-adjusted portfolio (same model params as V10)
+    V11_PARAMS = {**V10_PARAMS}
+
     # Alternative: Regression-based ranking (optimized for speed)
     REGRESSION_PARAMS = {
         'objective': 'regression',
@@ -49,7 +106,7 @@ class MLRanker:
     }
 
     def __init__(self, feature_cols: List[str], target_col: str = 'target_rank_21d',
-                 model_type: str = 'ranker', time_decay: float = 0.5):
+                 model_type: str = 'ranker', time_decay: float = 0.5, patience: int = 50):
         """
         Initialize ML Ranker.
 
@@ -58,11 +115,13 @@ class MLRanker:
             target_col: Target column name
             model_type: 'ranker' (lambdarank) or 'regressor'
             time_decay: Time decay factor (0=no decay, 1=strong decay). Default 0.5
+            patience: Early stopping patience (default 50)
         """
         self.feature_cols = feature_cols
         self.target_col = target_col
         self.model_type = model_type
         self.time_decay = time_decay
+        self.patience = patience
         self.model = None
         self.logger = logging.getLogger(__name__)
 
@@ -195,7 +254,7 @@ class MLRanker:
             y_val = val_df[self.target_col].values
 
             val_data = lgb.Dataset(X_val, label=y_val, reference=train_data)
-            callbacks.append(lgb.early_stopping(50))
+            callbacks.append(lgb.early_stopping(self.patience))
 
             self.model = lgb.train(
                 params, train_data,

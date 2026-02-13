@@ -235,8 +235,12 @@ class IndexETLPipeline:
 
     @staticmethod
     def _generate_index_code(index_class: str, index_name: str) -> str:
-        """Generate unique index code."""
-        return f"{index_class}_{index_name}".replace(" ", "_").replace("/", "_")
+        """Generate unique index code with proper formatting."""
+        # Apply formatting rules:
+        # 1. Replace · (middle dot) with _
+        # 2. Remove % if it exists at the end
+        formatted_name = index_name.replace("·", "_").rstrip("%")
+        return f"{index_class}_{formatted_name}".replace(" ", "_").replace("/", "_")
 
     @staticmethod
     def parse_number(value: str) -> Optional[float]:

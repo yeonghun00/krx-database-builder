@@ -6,6 +6,7 @@ config.json
 *.db-journal
 *.db-wal
 *.db-shm
+*.zip
 
 # Logs
 *.log
@@ -37,9 +38,17 @@ screening_results_*.xlsx
 
 # Progress files
 .etl_progress.json
+*.progress.json
 
 # Feature cache
 .cache/
+*.parquet
+
+# Generated outputs
+picks_*.csv
 
 # Claude
 .claude/
+
+# Doc
+doc/

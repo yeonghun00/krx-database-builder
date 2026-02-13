@@ -35,6 +35,8 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.common.actions.wheel_input import ScrollOrigin
+from selenium.webdriver import ActionChains
 # webdriver_manager removed — Selenium 4.6+ has built-in driver management
 
 # Add parent directory to path
@@ -101,7 +103,10 @@ class KRXIndexScraper:
         return driver
 
     def scrape_listing_page(self) -> List[Dict]:
-        """Fetch the KOSPI index listing page using Selenium and extract index links."""
+        """Fetch the KOSPI index listing page using Selenium and extract index links.
+        
+        Scrolls through the table incrementally to load all indices from virtual scrolling tables.
+        """
         indices = []
         driver = None
 
@@ -117,31 +122,103 @@ class KRXIndexScraper:
 
             print(f"Page loaded successfully")
 
-            # Find all links to index detail pages
-            links = driver.find_elements(By.CSS_SELECTOR, 'a[href*="MKD03040101.jsp"]')
+            # Try to find the scrollable table container for virtual scrolling
+            try:
+                table_container = driver.find_element(By.CSS_SELECTOR, "tbody.CI-GRID-BODY-TABLE-TBODY")
+                print("Found scrollable table container, scrolling to load all indices...")
+                
+                # Track unique links using a set of (name, href) tuples
+                seen_links = set()
+                scroll_attempts = 0
+                max_scroll_attempts = 200  # Safety limit
+                scroll_increment = 300  # Pixels to scroll each time
+                no_progress_count = 0
+                
+                while scroll_attempts < max_scroll_attempts:
+                    # Find all currently visible links before scrolling
+                    links = driver.find_elements(By.CSS_SELECTOR, 'a[href*="MKD03040101.jsp"]')
+                    
+                    new_links_found = 0
+                    for link in links:
+                        href = link.get_attribute('href') or ''
+                        text = link.text.strip()
+                        
+                        if not text:
+                            continue
+                        
+                        link_key = (text, href)
+                        if link_key not in seen_links:
+                            seen_links.add(link_key)
+                            new_links_found += 1
+                            
+                            parsed = urlparse(href)
+                            params = parse_qs(parsed.query)
+                            
+                            upmid_cd = params.get('upmidCd', [''])[0]
+                            idx_cd = params.get('idxCd', [''])[0]
+                            idx_id = params.get('idxId', [''])[0]
+                            
+                            if idx_cd and idx_id:
+                                indices.append({
+                                    'name': text,
+                                    'href': href,
+                                    'upmidCd': upmid_cd,
+                                    'idxCd': idx_cd,
+                                    'idxId': idx_id,
+                                })
+                    
+                    # Use Selenium 4 Wheel Actions to scroll the table container
+                    scroll_origin = ScrollOrigin.from_element(table_container)
+                    ActionChains(driver).scroll_from_origin(scroll_origin, 0, scroll_increment).perform()
+                    
+                    # Wait a bit for new content to load
+                    time.sleep(0.5)
+                    
+                    # Check if we've made progress
+                    if new_links_found == 0:
+                        no_progress_count += 1
+                        if no_progress_count > 5:  # Give it a few attempts
+                            print(f"  No new links found after {no_progress_count} scroll attempts, stopping")
+                            break
+                    else:
+                        no_progress_count = 0
+                    
+                    scroll_attempts += 1
+                    
+                    if scroll_attempts % 10 == 0:
+                        print(f"  Scrolled {scroll_attempts} times, found {len(indices)} indices so far...")
+                
+                print(f"Finished scrolling. Total indices found: {len(indices)}")
+                
+            except Exception as scroll_error:
+                # Fallback: if we can't find the scrollable container, use the original method
+                print(f"Could not find scrollable table container ({scroll_error}), using fallback method")
+                
+                # Find all links to index detail pages (non-scrolling fallback)
+                links = driver.find_elements(By.CSS_SELECTOR, 'a[href*="MKD03040101.jsp"]')
 
-            for link in links:
-                href = link.get_attribute('href') or ''
-                text = link.text.strip()
+                for link in links:
+                    href = link.get_attribute('href') or ''
+                    text = link.text.strip()
 
-                if not text:
-                    continue
+                    if not text:
+                        continue
 
-                parsed = urlparse(href)
-                params = parse_qs(parsed.query)
+                    parsed = urlparse(href)
+                    params = parse_qs(parsed.query)
 
-                upmid_cd = params.get('upmidCd', [''])[0]
-                idx_cd = params.get('idxCd', [''])[0]
-                idx_id = params.get('idxId', [''])[0]
+                    upmid_cd = params.get('upmidCd', [''])[0]
+                    idx_cd = params.get('idxCd', [''])[0]
+                    idx_id = params.get('idxId', [''])[0]
 
-                if idx_cd and idx_id:
-                    indices.append({
-                        'name': text,
-                        'href': href,
-                        'upmidCd': upmid_cd,
-                        'idxCd': idx_cd,
-                        'idxId': idx_id,
-                    })
+                    if idx_cd and idx_id:
+                        indices.append({
+                            'name': text,
+                            'href': href,
+                            'upmidCd': upmid_cd,
+                            'idxCd': idx_cd,
+                            'idxId': idx_id,
+                        })
 
         except Exception as e:
             print(f"Error during Selenium scraping: {e}")
@@ -204,7 +281,9 @@ class KRXIndexScraper:
         from_date = '20260203'
         to_date = '20260210'
 
-        ind_tp_cd = '1'
+        # Use different ind_tp_cd based on market
+        # KOSPI uses '1', KOSDAQ uses '2'
+        ind_tp_cd = '1' if self.market == 'kospi' else '2'
         idx_ind_cd = idx_cd[-3:] if len(idx_cd) >= 3 else idx_cd
 
         otp_params = {

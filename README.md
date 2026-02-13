@@ -38,7 +38,7 @@ cp config.example.json config.json
 # Edit config.json with your KRX API key
 
 # Check status
-python3 algostock_cli.py etl status
+python3 scripts/algostock_cli.py etl status
 ```
 
 ## Getting KRX API Key
@@ -53,48 +53,48 @@ python3 algostock_cli.py etl status
 
 ```bash
 # Database status
-python3 algostock_cli.py etl status
+python3 scripts/algostock_cli.py etl status
 
 # Daily update
-python3 algostock_cli.py etl update
+python3 scripts/algostock_cli.py etl update
 
 # Auto catch-up (fills any gaps)
-python3 algostock_cli.py etl update --catchup
+python3 scripts/algostock_cli.py etl update --catchup
 
 # Historical backfill
-python3 algostock_cli.py etl backfill -s 20200101 -e 20201231
+python3 scripts/algostock_cli.py etl backfill -s 20200101 -e 20201231
 
 # Verify data completeness
-python3 algostock_cli.py etl verify
+python3 scripts/algostock_cli.py etl verify
 
 # Auto-fix missing data
-python3 algostock_cli.py etl verify --fix
+python3 scripts/algostock_cli.py etl verify --fix
 ```
 
 ### Stock Screening
 
 ```bash
 # Top 5% by price increase
-python3 algostock_cli.py analyze price -s 20240101 -e 20241231 -p 5
+python3 scripts/algostock_cli.py analyze price -s 20240101 -e 20241231 -p 5
 
 # Top 5% by trading value
-python3 algostock_cli.py analyze value -s 20240101 -e 20241231 -p 5
+python3 scripts/algostock_cli.py analyze value -s 20240101 -e 20241231 -p 5
 
 # Combined: top 5% in BOTH price AND value
-python3 algostock_cli.py analyze combined -s 20240101 -e 20241231 -pp 5 -vp 5
+python3 scripts/algostock_cli.py analyze combined -s 20240101 -e 20241231 -pp 5 -vp 5
 
 # Filter by market (kospi, kosdaq, kodex)
-python3 algostock_cli.py analyze combined -s 20240101 -e 20241231 -m kospi,kosdaq
+python3 scripts/algostock_cli.py analyze combined -s 20240101 -e 20241231 -m kospi,kosdaq
 ```
 
 ### Backtesting
 
 ```bash
 # Basic: yearly screening, 1-year hold
-python3 algostock_cli.py backtest -s 20200101 -e 20241231
+python3 scripts/algostock_cli.py backtest -s 20200101 -e 20241231
 
 # Custom strategy
-python3 algostock_cli.py backtest -s 20200101 -e 20241231 \
+python3 scripts/algostock_cli.py backtest -s 20200101 -e 20241231 \
     --n-stocks 10 \
     --holding-months 6 \
     --rebalance-months 6 \
@@ -116,14 +116,34 @@ python3 algostock_cli.py backtest -s 20200101 -e 20241231 \
 
 ```
 algostock/
-├── algostock_cli.py       # Unified CLI interface
-├── krx_api.py             # KRX API client
-├── clean_etl.py           # ETL pipeline
-├── config.py              # Configuration loader
-├── config.example.json    # Example config template
-├── analyzer/
-│   ├── screeners.py       # Stock screening engine
-│   └── backtester.py      # Backtesting engine
+├── config.py                # Configuration loader
+├── config.example.json      # Example config template
+├── scripts/                 # Runnable entry points
+│   ├── algostock_cli.py     # Unified CLI interface
+│   ├── run_backtest.py      # ML backtest runner
+│   ├── get_picks.py         # Daily stock picks
+│   ├── run_safety_check.py  # Model safety checks
+│   ├── run_index_etl.py     # Index data ETL runner
+│   └── build_benchmark.py   # Benchmark builder
+├── etl/                     # Data pipeline
+│   ├── krx_api.py           # KRX API client
+│   ├── clean_etl.py         # Main ETL pipeline
+│   ├── financial_etl.py     # Financial statement loader
+│   └── index_etl.py         # Market index ETL
+├── ml/                      # ML pipeline
+│   ├── features.py          # Feature engineering
+│   ├── model.py             # LightGBM ranker
+│   ├── macro_features.py    # Macro regime detection
+│   └── backtest.py          # ML backtester
+├── features/                # Financial features
+│   └── financial_features.py
+├── analyzer/                # Screening & backtesting
+│   ├── screeners.py         # Stock screening engine
+│   └── backtester.py        # Backtesting engine
+├── models/                  # Saved ML models
+├── data/                    # Data files
+│   └── raw_financial/       # Raw financial statement zips
+├── docs/                    # Documentation
 └── requirements.txt
 ```
 

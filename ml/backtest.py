@@ -126,6 +126,9 @@ class MLBacktester:
         # Filter by markets if specified
         if markets:
             df = df[df["market_type"].isin(markets)]
+
+        if len(df) == 0:
+            self.logger.warning("No data after market filtering")
             return {}
 
         feature_cols = FeatureEngineer.FEATURE_COLUMNS
