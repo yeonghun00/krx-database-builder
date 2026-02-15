@@ -15,10 +15,6 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from ml.features import FeatureEngineer
-from ml.model import MLRanker, walk_forward_split
-from ml.models import get_model_class
-
 
 def _compute_core_stats(results: pd.DataFrame) -> dict:
     """Compute all backtest statistics from results DataFrame."""
@@ -130,6 +126,151 @@ def _compute_core_stats(results: pd.DataFrame) -> dict:
     return s
 
 
+def _compute_performance(returns: pd.Series, years: pd.Series | None = None) -> dict:
+    """Compute annualized return/vol/sharpe for a return series."""
+    r = returns.dropna()
+    if r.empty:
+        return {"total_return": np.nan, "ann_return": np.nan, "ann_vol": np.nan, "sharpe": np.nan}
+
+    if years is not None:
+        y = years.loc[r.index]
+        n_years = max(int(y.nunique()), 1)
+    else:
+        n_years = 1
+    rebals_per_year = max(len(r) / n_years, 1)
+
+    total_return = float((1.0 + r).prod() - 1.0)
+    ann_return = float((1.0 + total_return) ** (1.0 / n_years) - 1.0)
+    ann_vol = float(r.std() * np.sqrt(rebals_per_year))
+    sharpe = ann_return / ann_vol if ann_vol > 0 else np.nan
+    return {
+        "total_return": total_return,
+        "ann_return": ann_return,
+        "ann_vol": ann_vol,
+        "sharpe": sharpe,
+    }
+
+
+def _parse_exclude_years(raw: str) -> set[str]:
+    years: set[str] = set()
+    if not raw:
+        return years
+    for token in raw.split(","):
+        t = token.strip()
+        if len(t) == 4 and t.isdigit():
+            years.add(t)
+    return years
+
+
+def _print_table(title: str, headers: list[str], rows: list[list[str]]) -> None:
+    """Pretty-print table-like outputs with prettytable."""
+    print(f"\n{title:^70}")
+    try:
+        from prettytable import PrettyTable
+    except ImportError:
+        # Fallback if dependency is missing.
+        print("  (prettytable not installed)")
+        print("  " + " | ".join(headers))
+        for row in rows:
+            print("  " + " | ".join(row))
+        return
+
+    table = PrettyTable()
+    table.field_names = headers
+    table.align = "l"
+    for row in rows:
+        table.add_row(row)
+    print(table)
+
+
+def _print_requested_tests(results: pd.DataFrame) -> None:
+    """Run and print the 4 requested follow-up tests."""
+    if results.empty:
+        return
+
+    print("\n" + "=" * 70)
+    print("  REQUESTED TESTS")
+    print("=" * 70)
+
+    years = results["year"] if "year" in results.columns else None
+
+    test_rows: list[list[str]] = []
+
+    # 1) Long-short decile spread
+    if "long_short_return" in results.columns:
+        ls = _compute_performance(results["long_short_return"], years)
+        test_rows.append([
+            "1",
+            "Long-Short (Top 10% - Bottom 10%)",
+            f"{ls['ann_return']:.2%}",
+            f"{ls['sharpe']:.2f}",
+            "OK",
+        ])
+    else:
+        test_rows.append(["1", "Long-Short (Top 10% - Bottom 10%)", "N/A", "N/A", "Unavailable"])
+
+    # 2) Beta hedge test (market-neutralized by realized beta)
+    if {"portfolio_return", "benchmark_return"}.issubset(results.columns):
+        bench = results["benchmark_return"]
+        port = results["portfolio_return"]
+        beta = float(port.cov(bench) / bench.var()) if bench.var() > 0 else np.nan
+        hedged = port - beta * bench if pd.notna(beta) else port - bench
+        hedged_stats = _compute_performance(hedged, years)
+        beta_str = f"{beta:.2f}" if pd.notna(beta) else "N/A"
+        test_rows.append([
+            "2",
+            f"Beta-Hedged (beta={beta_str})",
+            f"{hedged_stats['ann_return']:.2%}",
+            f"{hedged_stats['sharpe']:.2f}",
+            "OK",
+        ])
+    else:
+        test_rows.append(["2", "Beta-Hedged", "N/A", "N/A", "Unavailable"])
+
+    # 3) Remove 2023 and re-check sharpe on remaining periods
+    if "year" in results.columns:
+        ex_2023 = results[results["year"] != 2023].copy()
+        if not ex_2023.empty:
+            ex_stats = _compute_performance(ex_2023["portfolio_return"], ex_2023["year"])
+            verdict = "PASS" if pd.notna(ex_stats["sharpe"]) and ex_stats["sharpe"] >= 0.7 else "FAIL"
+            test_rows.append([
+                "3",
+                "Ex-2023 robustness",
+                f"{ex_stats['ann_return']:.2%}",
+                f"{ex_stats['sharpe']:.2f}",
+                f"{verdict} (>=0.70)",
+            ])
+        else:
+            test_rows.append(["3", "Ex-2023 robustness", "N/A", "N/A", "Unavailable"])
+    else:
+        test_rows.append(["3", "Ex-2023 robustness", "N/A", "N/A", "Unavailable"])
+
+    # 4) Turnover reduction variant (relaxed hold threshold + score smoothing)
+    required_cols = {"turnover_tuned", "transaction_cost_tuned", "portfolio_return_tuned"}
+    if required_cols.issubset(results.columns):
+        base_stats = _compute_performance(results["portfolio_return"], years)
+        tuned_stats = _compute_performance(results["portfolio_return_tuned"], years)
+        base_turnover = float(results["turnover"].mean()) if "turnover" in results.columns else np.nan
+        tuned_turnover = float(results["turnover_tuned"].mean())
+        base_cost = float(results["transaction_cost"].sum()) if "transaction_cost" in results.columns else np.nan
+        tuned_cost = float(results["transaction_cost_tuned"].sum())
+        test_rows.append([
+            "4",
+            f"Turnover reduction ({base_turnover:.2%}->{tuned_turnover:.2%})",
+            f"{base_cost:.2%}->{tuned_cost:.2%}",
+            f"{base_stats['sharpe']:.2f}->{tuned_stats['sharpe']:.2f}",
+            "OK",
+        ])
+    else:
+        test_rows.append(["4", "Turnover reduction", "N/A", "N/A", "Unavailable"])
+
+    _print_table(
+        "--- Requested Tests ---",
+        ["#", "Test", "Return / Cost", "Sharpe", "Status"],
+        test_rows,
+    )
+
+
 def summarize(results: pd.DataFrame, sector_rows: list, output_path: str = "backtest_report.png") -> None:
     """Print enhanced summary + generate visual report."""
     if results.empty:
@@ -181,24 +322,39 @@ def summarize(results: pd.DataFrame, sector_rows: list, output_path: str = "back
         print(f"  Quintile: {q_str}")
         print(f"  Monotonic: {'PASS' if s['q_mono'] else 'FAIL'}")
 
-    print(f"\n{'--- Annual Sharpe (연도별 안정성) ---':^70}")
-    for yr, row in s['annual'].iterrows():
-        sh = f"{row['ann_sharpe']:.2f}" if pd.notna(row['ann_sharpe']) else "N/A"
-        print(f"  {yr}:  Return={row['ann_port']:>7.2%}  Alpha={row['ann_alpha']:>7.2%}  Sharpe={sh:>6s}")
+    annual_rows: list[list[str]] = []
+    for yr, row in s["annual"].iterrows():
+        sh = f"{row['ann_sharpe']:.2f}" if pd.notna(row["ann_sharpe"]) else "N/A"
+        annual_rows.append([str(int(yr)), f"{row['ann_port']:.2%}", f"{row['ann_alpha']:.2%}", sh])
+    _print_table(
+        "--- Annual Sharpe (연도별 안정성) ---",
+        ["Year", "Return", "Alpha", "Sharpe"],
+        annual_rows,
+    )
 
     # Sector attribution text
     if not sector_df.empty:
-        print(f"\n{'--- Sector Attribution (섹터 귀인 분석) ---':^70}")
         sec_agg = sector_df.groupby("sector").agg(
             total_contribution=("contribution", "sum"),
             avg_weight=("weight", "mean"),
             appearances=("date", "count"),
         ).sort_values("total_contribution", ascending=False)
         total_contrib = sec_agg["total_contribution"].sum()
+        sec_rows: list[list[str]] = []
         for sec_name, row in sec_agg.head(10).iterrows():
             pct = row["total_contribution"] / total_contrib * 100 if total_contrib != 0 else 0
             short_name = sec_name.split("_")[-1] if "_" in sec_name else sec_name
-            print(f"  {short_name:<20s}  기여도={row['total_contribution']:>7.2%}  ({pct:>5.1f}%)  비중={row['avg_weight']:>5.1%}")
+            sec_rows.append([
+                str(short_name),
+                f"{row['total_contribution']:.2%}",
+                f"{pct:.1f}%",
+                f"{row['avg_weight']:.1%}",
+            ])
+        _print_table(
+            "--- Sector Attribution (섹터 귀인 분석) ---",
+            ["Sector", "Contribution", "Share", "Avg Weight"],
+            sec_rows,
+        )
 
     print("\n" + "=" * 70)
 
@@ -206,6 +362,7 @@ def summarize(results: pd.DataFrame, sector_rows: list, output_path: str = "back
     # VISUAL REPORT
     # ======================================================================
     _generate_visual_report(results, s, sector_df, output_path)
+    _print_requested_tests(results)
 
 
 def _generate_visual_report(results: pd.DataFrame, s: dict, sector_df: pd.DataFrame, output_path: str) -> None:
@@ -360,7 +517,7 @@ def _generate_visual_report(results: pd.DataFrame, s: dict, sector_df: pd.DataFr
         ax5.axhline(0, color="black", linewidth=0.5)
         mono_text = "MONOTONIC" if s["q_mono"] else "NOT MONOTONIC"
         mono_color = C_ALPHA if s["q_mono"] else C_NEG
-        ax5.set_title(f"Quintile Returns — {mono_text}", fontsize=13, fontweight="bold", color=mono_color)
+        ax5.set_title(f"Quintile Returns - {mono_text}", fontsize=13, fontweight="bold", color=mono_color)
         ax5.set_ylabel("Mean Forward Return (%)", fontsize=10)
     else:
         ax5.text(0.5, 0.5, "No quintile data", ha="center", va="center", fontsize=14)
@@ -475,6 +632,8 @@ def _generate_visual_report(results: pd.DataFrame, s: dict, sector_df: pd.DataFr
 
 def _run_fold(payload: dict) -> dict:
     """Run one walk-forward fold in a worker process."""
+    from ml.models import get_model_class
+
     train_df: pd.DataFrame = payload["train_df"]
     test_df: pd.DataFrame = payload["test_df"]
     info: dict = payload["info"]
@@ -499,6 +658,9 @@ def _run_fold(payload: dict) -> dict:
     embargo_days: int = payload["embargo_days"]
     cash_out_enabled: bool = payload.get("cash_out", False)
     model_class_name: str = payload.get("model_class", "lgbm")
+    run_turnover_test: bool = payload.get("run_turnover_test", True)
+    turnover_test_hold_rank: int = payload.get("turnover_test_hold_rank", hold_rank)
+    turnover_test_smoothing_alpha: float = payload.get("turnover_test_smoothing_alpha", 1.0)
     print(
         f"[Fold {info['test_year']}] start "
         f"(train={info['train_period']}, train_rows={len(train_df):,}, test_rows={len(test_df):,})",
@@ -552,6 +714,55 @@ def _run_fold(payload: dict) -> dict:
     date_groups = {d: g.copy() for d, g in test_df.groupby("date", sort=True)}
     rebalance_dates = sorted(date_groups.keys())[::rebalance_days]
     prev_holdings: set[str] = set(payload.get("prev_holdings", []))
+    prev_holdings_tuned: set[str] = set(payload.get("prev_holdings_tuned", []))
+    prev_scores_tuned: dict[str, float] = dict(payload.get("prev_scores_tuned", {}))
+
+    def _build_picks(
+        frame: pd.DataFrame,
+        rank_col: str,
+        rank_pos_col: str,
+        previous_holdings: set[str],
+        hold_rank_limit: int,
+        effective_top_n: int,
+    ) -> tuple[pd.DataFrame, set[str], float, float]:
+        keep_pool = frame[
+            (frame["stock_code"].isin(previous_holdings)) & (frame[rank_pos_col] <= hold_rank_limit)
+        ].copy()
+        already_in = set(keep_pool["stock_code"])
+        buy_candidates = frame[
+            (~frame["stock_code"].isin(already_in)) & (frame[rank_pos_col] <= buy_rank)
+        ].copy()
+
+        if len(keep_pool) > 0 and len(buy_candidates) > 0:
+            worst_keeper_score = keep_pool[rank_col].min()
+            score_edge = buy_fee_rate + sell_fee_rate
+            buy_candidates = buy_candidates[
+                buy_candidates[rank_col] > worst_keeper_score + score_edge
+            ].copy()
+
+        picks = pd.concat([keep_pool, buy_candidates], ignore_index=True)
+        picks = picks.sort_values(rank_col, ascending=False).drop_duplicates("stock_code")
+
+        if len(picks) < effective_top_n:
+            fill_pool = frame[
+                (~frame["stock_code"].isin(set(picks["stock_code"])))
+                & (frame[rank_pos_col] <= hold_rank_limit)
+            ].copy()
+            fill_pool = fill_pool.sort_values(rank_col, ascending=False)
+            picks = pd.concat([picks, fill_pool.head(effective_top_n - len(picks))], ignore_index=True)
+
+        picks = picks.sort_values(rank_col, ascending=False).drop_duplicates("stock_code")
+        picks = picks.head(effective_top_n).copy()
+        current_holdings = set(picks["stock_code"].tolist())
+        if not previous_holdings:
+            turnover = 1.0
+            transaction_cost = buy_fee_rate
+        else:
+            overlap = len(previous_holdings & current_holdings)
+            turnover = 1.0 - (overlap / max(effective_top_n, 1))
+            transaction_cost = turnover * (buy_fee_rate + sell_fee_rate)
+        return picks, current_holdings, turnover, transaction_cost
+
     for d in rebalance_dates:
         day_df = date_groups[d].copy()
         # PIT universe on rebalance date
@@ -588,54 +799,73 @@ def _run_fold(payload: dict) -> dict:
         q_mono = int(q5 > q4 > q3 > q2 > q1) if np.all(pd.notna([q1, q2, q3, q4, q5])) else 0
         ic = day_df[["score_rank", fwd_col]].corr(method="spearman").iloc[0, 1]
         ic = float(ic) if pd.notna(ic) else np.nan
-        # Hysteresis buffer:
-        # 1) Keep existing holdings while rank <= hold_rank (wide gate)
-        # 2) Buy new names ONLY when rank <= buy_rank (tight gate)
-        # 3) Fill remaining slots ONLY from rank <= hold_rank (not unrestricted)
-        # 4) New stock must score higher than worst keeper to justify cost
-        keep_pool = day_df[(day_df["stock_code"].isin(prev_holdings)) & (day_df["rank_pos"] <= hold_rank)].copy()
-        already_in = set(keep_pool["stock_code"])
-        buy_candidates = day_df[
-            (~day_df["stock_code"].isin(already_in)) & (day_df["rank_pos"] <= buy_rank)
-        ].copy()
+        decile_n = max(int(len(day_df) * 0.10), 1)
+        top_decile_return = float(day_df.nlargest(decile_n, "score_rank")[fwd_col].mean())
+        bottom_decile_return = float(day_df.nsmallest(decile_n, "score_rank")[fwd_col].mean())
+        long_short_return = top_decile_return - bottom_decile_return
 
-        # Cost-aware replacement: new stock must outscore the worst keeper
-        # by enough to justify the round-trip transaction cost.
-        if len(keep_pool) > 0 and len(buy_candidates) > 0:
-            worst_keeper_score = keep_pool["score_rank"].min()
-            score_edge = buy_fee_rate + sell_fee_rate  # ~1% round-trip as score hurdle
-            buy_candidates = buy_candidates[
-                buy_candidates["score_rank"] > worst_keeper_score + score_edge
-            ].copy()
+        picks, current_holdings, turnover, transaction_cost = _build_picks(
+            frame=day_df,
+            rank_col="score_rank",
+            rank_pos_col="rank_pos",
+            previous_holdings=prev_holdings,
+            hold_rank_limit=hold_rank,
+            effective_top_n=effective_top_n,
+        )
+        if picks.empty:
+            continue
 
-        picks = pd.concat([keep_pool, buy_candidates], ignore_index=True)
-        picks = picks.sort_values("score_rank", ascending=False).drop_duplicates("stock_code")
-
-        # Fill remaining slots — but ONLY from rank <= hold_rank (not from entire universe)
-        if len(picks) < effective_top_n:
-            fill_pool = day_df[
-                (~day_df["stock_code"].isin(set(picks["stock_code"])))
-                & (day_df["rank_pos"] <= hold_rank)
-            ].copy()
-            fill_pool = fill_pool.sort_values("score_rank", ascending=False)
-            picks = pd.concat([picks, fill_pool.head(effective_top_n - len(picks))], ignore_index=True)
-        picks = picks.head(effective_top_n).copy()
-        current_holdings = set(picks["stock_code"].tolist())
         stock_ret = float(picks[fwd_col].mean())
         # Blend with cash (0% return) when cash-out is active
         port_ret = stock_ret * (1.0 - cash_weight)
         bench_ret = float(day_df[fwd_col].mean())
-
-        if not prev_holdings:
-            turnover = 1.0  # initial deployment from cash
-            transaction_cost = buy_fee_rate
-        else:
-            overlap = len(prev_holdings & current_holdings)
-            turnover = 1.0 - (overlap / max(effective_top_n, 1))
-            transaction_cost = turnover * (buy_fee_rate + sell_fee_rate)
-
         net_port_ret = (1.0 + port_ret) * (1.0 - transaction_cost) - 1.0
         prev_holdings = current_holdings
+
+        # Turnover reduction test: relaxed hold threshold + score smoothing.
+        net_port_ret_tuned = np.nan
+        turnover_tuned = np.nan
+        transaction_cost_tuned = np.nan
+        if run_turnover_test:
+            if 0.0 < turnover_test_smoothing_alpha < 1.0:
+                prev_smoothed = day_df["stock_code"].map(prev_scores_tuned)
+                day_df["score_tuned"] = day_df["score"]
+                valid_prev = prev_smoothed.notna()
+                day_df.loc[valid_prev, "score_tuned"] = (
+                    turnover_test_smoothing_alpha * day_df.loc[valid_prev, "score"]
+                    + (1.0 - turnover_test_smoothing_alpha) * prev_smoothed.loc[valid_prev].astype(float)
+                )
+            else:
+                day_df["score_tuned"] = day_df["score"]
+
+            prev_scores_tuned.update(
+                {str(c): float(v) for c, v in zip(day_df["stock_code"], day_df["score_tuned"])}
+            )
+
+            if sector_neutral_score and "sector" in day_df.columns:
+                sec_mean_t = day_df.groupby("sector")["score_tuned"].transform("mean")
+                sec_std_t = day_df.groupby("sector")["score_tuned"].transform("std").replace(0, np.nan)
+                day_df["score_rank_tuned"] = (
+                    (day_df["score_tuned"] - sec_mean_t) / sec_std_t
+                ).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+            else:
+                day_df["score_rank_tuned"] = day_df["score_tuned"]
+
+            day_df["rank_pos_tuned"] = day_df["score_rank_tuned"].rank(ascending=False, method="first")
+            picks_tuned, current_holdings_tuned, turnover_tuned, transaction_cost_tuned = _build_picks(
+                frame=day_df,
+                rank_col="score_rank_tuned",
+                rank_pos_col="rank_pos_tuned",
+                previous_holdings=prev_holdings_tuned,
+                hold_rank_limit=turnover_test_hold_rank,
+                effective_top_n=effective_top_n,
+            )
+            if not picks_tuned.empty:
+                stock_ret_tuned = float(picks_tuned[fwd_col].mean())
+                port_ret_tuned = stock_ret_tuned * (1.0 - cash_weight)
+                net_port_ret_tuned = (1.0 + port_ret_tuned) * (1.0 - transaction_cost_tuned) - 1.0
+                prev_holdings_tuned = current_holdings_tuned
+
         sec = (
             picks.groupby("sector", as_index=False)
             .agg(
@@ -689,6 +919,12 @@ def _run_fold(payload: dict) -> dict:
                 "q4_ret": q4,
                 "q5_ret": q5,
                 "q_monotonic": q_mono,
+                "top_decile_return": top_decile_return,
+                "bottom_decile_return": bottom_decile_return,
+                "long_short_return": long_short_return,
+                "portfolio_return_tuned": net_port_ret_tuned,
+                "turnover_tuned": turnover_tuned,
+                "transaction_cost_tuned": transaction_cost_tuned,
                 "top_sector": top_sector,
                 "top_sector_weight": top_sector_weight,
                 "sector_hhi": sector_hhi,
@@ -709,10 +945,16 @@ def _run_fold(payload: dict) -> dict:
         "sector_rows": sector_rows,
         "pick_rows": pick_rows,
         "final_holdings": list(prev_holdings),
+        "final_holdings_tuned": list(prev_holdings_tuned),
+        "final_scores_tuned": prev_scores_tuned,
     }
 
 
 def run(args: argparse.Namespace) -> None:
+    from ml.features import FeatureEngineer
+    from ml.model import walk_forward_split
+    from ml.models import get_model_class
+
     effective_buy_fee = args.buy_fee
     effective_sell_fee = args.sell_fee
     if getattr(args, "no_sector_neutral", False):
@@ -738,6 +980,18 @@ def run(args: argparse.Namespace) -> None:
     if df.empty:
         print("No ML data available for the requested range.")
         return
+    exclude_years = _parse_exclude_years(args.exclude_years)
+    if exclude_years:
+        before_rows = len(df)
+        df = df[~df["date"].str[:4].isin(exclude_years)].copy()
+        print(
+            f"[Backtest] excluded years={sorted(exclude_years)} "
+            f"(rows {before_rows:,} -> {len(df):,})",
+            flush=True,
+        )
+        if df.empty:
+            print("No rows left after applying --exclude-years filter.")
+            return
     if args.stress_mode and 0 < args.vol_exclude_pct < 1 and "volatility_21d" in df.columns:
         vol_cut = df.groupby("date")["volatility_21d"].transform(
             lambda s: s.quantile(1.0 - args.vol_exclude_pct)
@@ -799,6 +1053,8 @@ def run(args: argparse.Namespace) -> None:
     print(f"  Train Window:     {args.train_years} years (rolling)")
     print(f"  Folds:            {len(splits)}   Test Years: {split_years}")
     print(f"  Embargo:          {args.embargo_days} days")
+    if exclude_years:
+        print(f"  Excluded Years:   {sorted(exclude_years)}")
     print(f"\n{'--- Portfolio ---':^70}")
     print(f"  Top N:            {args.top_n}")
     print(f"  Rebalance:        every {args.rebalance_days} trading days")
@@ -807,6 +1063,11 @@ def run(args: argparse.Namespace) -> None:
     print(f"  Sector Neutral:   {effective_sector_neutral}")
     cash_out_flag = getattr(args, "cash_out", False)
     print(f"  Cash-Out (20d):   {cash_out_flag}")
+    print(
+        "  Turnover Test:    "
+        f"hold_rank<={args.turnover_test_hold_rank}, "
+        f"smoothing_alpha={args.turnover_test_smoothing_alpha:.2f}"
+    )
     if args.stress_mode:
         print(f"  Stress Mode:      ON (vol_exclude={args.vol_exclude_pct:.0%})")
     print("=" * 70 + "\n", flush=True)
@@ -839,6 +1100,9 @@ def run(args: argparse.Namespace) -> None:
             "embargo_days": args.embargo_days,
             "cash_out": args.cash_out,
             "model_class": args.model,
+            "run_turnover_test": not args.disable_turnover_test,
+            "turnover_test_hold_rank": args.turnover_test_hold_rank,
+            "turnover_test_smoothing_alpha": args.turnover_test_smoothing_alpha,
         }
         for train_df, test_df, info in splits
     ]
@@ -847,11 +1111,17 @@ def run(args: argparse.Namespace) -> None:
         # Sequential: carry holdings across folds to avoid 100% turnover at fold boundaries
         fold_results = []
         carry_holdings: list[str] = []
+        carry_holdings_tuned: list[str] = []
+        carry_scores_tuned: dict[str, float] = {}
         for p in fold_payloads:
             p["prev_holdings"] = carry_holdings
+            p["prev_holdings_tuned"] = carry_holdings_tuned
+            p["prev_scores_tuned"] = carry_scores_tuned
             res = _run_fold(p)
             fold_results.append(res)
             carry_holdings = res.get("final_holdings", [])
+            carry_holdings_tuned = res.get("final_holdings_tuned", [])
+            carry_scores_tuned = res.get("final_scores_tuned", {})
     else:
         fold_results = []
         with ProcessPoolExecutor(max_workers=workers) as ex:
@@ -927,43 +1197,54 @@ def run(args: argparse.Namespace) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run unified model backtest")
-    parser.add_argument("--model", default="lgbm", choices=["lgbm", "xgboost", "catboost"],
-                        help="Model type to use (default: lgbm)")
-    parser.add_argument("--db", default="krx_stock_data.db")
-    parser.add_argument("--start", default="20100101")
-    parser.add_argument("--end", default="20260213")
-    parser.add_argument("--horizon", type=int, default=21)
-    parser.add_argument("--top-n", type=int, default=30)
-    parser.add_argument("--rebalance-days", type=int, default=63)
-    parser.add_argument("--train-years", type=int, default=5)
-    parser.add_argument("--min-market-cap", type=int, default=500_000_000_000)
-    parser.add_argument("--time-decay", type=float, default=0.2)
-    parser.add_argument("--learning-rate", type=float, default=0.03)
-    parser.add_argument("--n-estimators", type=int, default=800)
-    parser.add_argument("--patience", type=int, default=80)
-    parser.add_argument("--output", default="backtest_unified_results.csv")
-    parser.add_argument("--model-out", default="models/lgbm_unified.pkl")
-    parser.add_argument("--workers", type=int, default=4)
-    parser.add_argument("--model-jobs", type=int, default=0, help="LightGBM threads per worker (0=auto)")
-    parser.add_argument("--buy-fee", type=float, default=0.5, help="Buy fee percent per trade (default 0.5)")
-    parser.add_argument("--sell-fee", type=float, default=0.5, help="Sell fee percent per trade (default 0.5)")
+    class HelpFormatter(argparse.ArgumentDefaultsHelpFormatter, argparse.MetavarTypeHelpFormatter):
+        """Show defaults and type-based metavars in --help output."""
+
+    parser = argparse.ArgumentParser(
+        description="Run unified model backtest",
+        formatter_class=HelpFormatter,
+    )
+    parser.add_argument(
+        "--model",
+        type=str,
+        default="lgbm",
+        choices=["lgbm", "xgboost", "catboost"],
+        help="Model family",
+    )
+    parser.add_argument("--db", type=str, default="krx_stock_data.db", help="SQLite DB path")
+    parser.add_argument("--start", type=str, default="20100101", help="Start date (YYYYMMDD)")
+    parser.add_argument("--end", type=str, default="20260213", help="End date (YYYYMMDD)")
+    parser.add_argument("--horizon", type=int, default=21, help="Forward return horizon (trading days)")
+    parser.add_argument("--top-n", type=int, default=30, help="Portfolio size at each rebalance")
+    parser.add_argument("--rebalance-days", type=int, default=63, help="Rebalance interval in trading days")
+    parser.add_argument("--train-years", type=int, default=5, help="Walk-forward training window in years")
+    parser.add_argument("--min-market-cap", type=int, default=500_000_000_000, help="Minimum market cap filter")
+    parser.add_argument("--time-decay", type=float, default=0.2, help="Sample time-decay strength")
+    parser.add_argument("--learning-rate", type=float, default=0.03, help="Model learning rate")
+    parser.add_argument("--n-estimators", type=int, default=800, help="Max boosting rounds")
+    parser.add_argument("--patience", type=int, default=80, help="Early-stopping rounds")
+    parser.add_argument("--output", type=str, default="backtest_unified_results.csv", help="Output CSV path")
+    parser.add_argument("--model-out", type=str, default="models/lgbm_unified.pkl", help="Saved model path")
+    parser.add_argument("--workers", type=int, default=4, help="Parallel walk-forward workers")
+    parser.add_argument("--model-jobs", type=int, default=0, help="Model threads per worker (0=auto)")
+    parser.add_argument("--buy-fee", type=float, default=0.5, help="Buy fee percent per trade")
+    parser.add_argument("--sell-fee", type=float, default=0.5, help="Sell fee percent per trade")
     parser.add_argument("--stress-mode", action="store_true", help="Enable realism stress tests")
-    parser.add_argument("--vol-exclude-pct", type=float, default=0.10, help="Exclude top N%% volatility names (default 0.10)")
-    parser.add_argument("--sector-neutral-score", action="store_true", default=True,
-                        help="Use sector-neutral z-score ranking for picks (default: on)")
-    parser.add_argument("--no-sector-neutral", action="store_true",
-                        help="Disable sector-neutral scoring")
-    parser.add_argument("--buy-rank", type=int, default=10, help="Buy only if rank <= this threshold (default 10)")
-    parser.add_argument("--hold-rank", type=int, default=90, help="Keep holding while rank <= this threshold (default 90)")
-    parser.add_argument("--embargo-days", type=int, default=21, help="Purged embargo gap in trading days (default 21)")
-    parser.add_argument("--cash-out", action="store_true", default=True,
-                        help="Go 50%% cash when KOSPI200 below 20d MA (default: on)")
-    parser.add_argument("--no-cash-out", action="store_true",
-                        help="Disable cash-out logic")
+    parser.add_argument("--vol-exclude-pct", type=float, default=0.10, help="Exclude top N%% volatility names")
+    parser.add_argument("--sector-neutral-score", action="store_true", default=True, help="Enable sector-neutral ranking")
+    parser.add_argument("--no-sector-neutral", action="store_true", help="Disable sector-neutral ranking")
+    parser.add_argument("--buy-rank", type=int, default=10, help="Buy only if rank <= threshold")
+    parser.add_argument("--hold-rank", type=int, default=90, help="Hold while rank <= threshold")
+    parser.add_argument("--embargo-days", type=int, default=21, help="Purged embargo gap in trading days")
+    parser.add_argument("--cash-out", action="store_true", default=True, help="Enable 20d regime cash-out rule")
+    parser.add_argument("--no-cash-out", action="store_true", help="Disable cash-out rule")
+    parser.add_argument("--exclude-years", type=str, default="", help="Comma-separated years to remove (e.g. 2023,2024)")
+    parser.add_argument("--turnover-test-hold-rank", type=int, default=120, help="Hold-rank in turnover test variant")
+    parser.add_argument("--turnover-test-smoothing-alpha", type=float, default=0.70, help="EMA alpha for turnover test")
+    parser.add_argument("--disable-turnover-test", action="store_true", help="Disable turnover test variant")
     parser.add_argument("--save-picks", action="store_true", help="Save picked stocks per rebalance date to CSV")
-    parser.add_argument("--no-cache", action="store_true")
-    parser.add_argument("--log-level", default="WARNING")
+    parser.add_argument("--no-cache", action="store_true", help="Disable feature cache")
+    parser.add_argument("--log-level", type=str, default="WARNING", help="Python logging level")
     args = parser.parse_args()
 
     logging.basicConfig(level=getattr(logging, args.log_level.upper(), logging.WARNING))

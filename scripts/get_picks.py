@@ -20,9 +20,124 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from ml.features import FeatureEngineer
-from ml.model import MLRanker
-from ml.models import get_model_class
+
+def _truncate_text(value: object, max_len: int) -> str:
+    text = "" if pd.isna(value) else str(value)
+    if max_len <= 0 or len(text) <= max_len:
+        return text
+    if max_len <= 1:
+        return text[:max_len]
+    return text[: max_len - 1] + "…"
+
+
+def _format_market_cap_short(value: object) -> str:
+    if pd.isna(value):
+        return ""
+    v = float(value)
+    units = [(1e12, "T"), (1e9, "B"), (1e6, "M"), (1e3, "K")]
+    for base, suffix in units:
+        if abs(v) >= base:
+            return f"{v / base:.2f}{suffix}"
+    return f"{v:.0f}"
+
+
+def _format_display_df(df: pd.DataFrame, decimals: int) -> pd.DataFrame:
+    """Format numeric values for terminal display."""
+    out = df.copy()
+    if "sector" in out.columns:
+        out["sector"] = out["sector"].map(
+            lambda v: "" if pd.isna(v) else str(v).split("_")[-1]
+        )
+    if "name" in out.columns:
+        out["name"] = out["name"].map(lambda v: _truncate_text(v, 14))
+    if "sector" in out.columns:
+        out["sector"] = out["sector"].map(lambda v: _truncate_text(v, 16))
+    if "market_cap" in out.columns:
+        out["market_cap"] = out["market_cap"].map(_format_market_cap_short)
+    for col in out.columns:
+        if pd.api.types.is_float_dtype(out[col]):
+            out[col] = out[col].map(lambda v: "" if pd.isna(v) else f"{float(v):.{decimals}f}")
+        elif pd.api.types.is_integer_dtype(out[col]):
+            out[col] = out[col].map(lambda v: "" if pd.isna(v) else f"{int(v):,}")
+    return out
+
+
+def _print_df_vertical(title: str, df: pd.DataFrame, decimals: int) -> None:
+    """Print one pick per block for narrow terminals."""
+    display_df = _format_display_df(df, decimals=decimals)
+    print(f"\n=== {title} ===")
+    if display_df.empty:
+        print("(no rows)")
+        return
+    for idx, row in enumerate(display_df.to_dict("records"), start=1):
+        print(f"\n[{title} #{idx}]")
+        for k, v in row.items():
+            print(f"- {k}: {v}")
+
+
+def _print_df_table(
+    title: str,
+    df: pd.DataFrame,
+    decimals: int = 2,
+    max_columns: int = 6,
+    id_columns: tuple[str, ...] = ("rank",),
+    first_page_context_columns: tuple[str, ...] = ("stock_code", "name", "sector"),
+) -> None:
+    """Print DataFrame as one or more readable terminal tables."""
+    if df.empty:
+        print(f"\n=== {title} ===")
+        print("(no rows)")
+        return
+
+    display_df = _format_display_df(df, decimals=decimals)
+    cols = [str(c) for c in display_df.columns]
+    max_columns = max(1, int(max_columns))
+
+    id_cols = [c for c in id_columns if c in cols]
+    context_cols = [c for c in first_page_context_columns if c in cols and c not in id_cols]
+
+    if len(cols) <= max_columns:
+        parts = [cols]
+    elif not id_cols:
+        parts = [cols[i:i + max_columns] for i in range(0, len(cols), max_columns)]
+    else:
+        # First page: include context columns once.
+        first_base = id_cols + context_cols
+        if len(first_base) >= max_columns:
+            first_part = first_base[:max_columns]
+            rest_cols = [c for c in cols if c not in first_part]
+        else:
+            remaining_cols = [c for c in cols if c not in first_base]
+            first_room = max(0, max_columns - len(first_base))
+            first_part = first_base + remaining_cols[:first_room]
+            rest_cols = remaining_cols[first_room:]
+
+        parts = [first_part] if first_part else [id_cols]
+
+        # Later pages: repeat only identifiers.
+        follow_room = max(1, max_columns - len(id_cols))
+        for i in range(0, len(rest_cols), follow_room):
+            parts.append(id_cols + rest_cols[i:i + follow_room])
+
+    try:
+        from prettytable import PrettyTable
+    except ImportError:
+        for idx, part_cols in enumerate(parts, start=1):
+            part_title = title if len(parts) == 1 else f"{title} ({idx}/{len(parts)})"
+            print(f"\n=== {part_title} ===")
+            print(display_df[part_cols].to_string(index=False))
+        return
+
+    for idx, part_cols in enumerate(parts, start=1):
+        part_title = title if len(parts) == 1 else f"{title} ({idx}/{len(parts)})"
+        print(f"\n=== {part_title} ===")
+        table = PrettyTable()
+        table.field_names = part_cols
+        table.align = "l"
+        table.max_width = 18
+        for row in display_df[part_cols].itertuples(index=False, name=None):
+            table.add_row([v if pd.notna(v) else "" for v in row])
+        print(table)
 
 
 def _select_target_col(df: pd.DataFrame, horizon: int) -> str:
@@ -51,6 +166,8 @@ def _retrain_model(
     model_name: str = "lgbm",
 ) -> MLRanker:
     """Retrain with proper val split + early stopping (matches backtest logic)."""
+    from ml.models import get_model_class
+
     train_years = sorted(df["date"].str[:4].unique())
     val_year = train_years[-1]
     sub_train = df[df["date"].str[:4] != val_year].copy()
@@ -100,10 +217,20 @@ def main() -> None:
     parser.add_argument("--n-estimators", type=int, default=2000)
     parser.add_argument("--patience", type=int, default=200)
     parser.add_argument("--workers", type=int, default=4)
+    parser.add_argument("--display-decimals", type=int, default=2,
+                        help="Decimal places for numeric values in terminal tables")
+    parser.add_argument("--max-columns", type=int, default=6,
+                        help="Maximum columns per printed table (wide tables are split)")
+    parser.add_argument("--display-style", choices=["table", "vertical"], default="table",
+                        help="How to render picks in terminal")
+    parser.add_argument("--view", choices=["compact", "full"], default="full",
+                        help="Column set for terminal display")
     parser.add_argument("--no-cache", action="store_true")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.WARNING)
+
+    from ml.features import FeatureEngineer
 
     from datetime import datetime
     end_date = args.end or datetime.now().strftime("%Y%m%d")
@@ -171,7 +298,18 @@ def main() -> None:
 
     latest_date = pred_df["date"].max()
 
-    view_cols = [
+    compact_cols = [
+        "rank",
+        "stock_code",
+        "name",
+        "sector",
+        "closing_price",
+        "market_cap",
+        "score",
+        "roe",
+        "mom_21d",
+    ]
+    full_cols = [
         "rank",
         "stock_code",
         "name",
@@ -189,22 +327,25 @@ def main() -> None:
         "low_price_trap",
         "sector_dispersion_21d",
     ]
-    view_cols = [c for c in view_cols if c in pred_df.columns]
+    display_cols = compact_cols if args.view == "compact" else full_cols
+    display_cols = [c for c in display_cols if c in pred_df.columns]
+    export_cols = [c for c in full_cols if c in pred_df.columns]
 
-    longs = pred_df.nsmallest(args.top, "rank")[view_cols]
-    avoids = pred_df.nlargest(args.bottom, "rank")[view_cols]
+    longs = pred_df.nsmallest(args.top, "rank")[display_cols]
+    avoids = pred_df.nlargest(args.bottom, "rank")[display_cols]
 
     print(f"\nBase date: {latest_date}")
     print(f"Universe: {len(pred_df)}")
 
-    print("\n=== Top Picks ===")
-    print(longs.to_string(index=False))
-
-    print("\n=== Avoid Picks ===")
-    print(avoids.to_string(index=False))
+    if args.display_style == "vertical":
+        _print_df_vertical("Top Picks", longs, decimals=args.display_decimals)
+        _print_df_vertical("Avoid Picks", avoids, decimals=args.display_decimals)
+    else:
+        _print_df_table("Top Picks", longs, decimals=args.display_decimals, max_columns=args.max_columns)
+        _print_df_table("Avoid Picks", avoids, decimals=args.display_decimals, max_columns=args.max_columns)
 
     out_file = Path(f"picks_unified_{latest_date}.csv")
-    pred_df[view_cols].sort_values("rank").to_csv(out_file, index=False)
+    pred_df[export_cols].sort_values("rank").to_csv(out_file, index=False)
     print(f"\nSaved ranking to {out_file}")
 
 
